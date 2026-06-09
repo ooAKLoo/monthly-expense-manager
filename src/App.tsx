@@ -55,6 +55,13 @@ type UploadRecord = {
   confidence: number;
 };
 
+type ExportSummary = {
+  total: number;
+  reported: number;
+  unreported: number;
+  count: number;
+};
+
 const exchangeRate = 7.21;
 
 const seedExpenses: Expense[] = [
@@ -539,6 +546,27 @@ function getDateRangeLabel(date: Date) {
   return `${start} - ${end}`;
 }
 
+function getDownloadStamp(date = new Date()) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+  ].join("");
+}
+
+function sanitizeFilenamePart(value: string) {
+  return value.replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, "");
+}
+
+function getFilterLabel(statusFilter: "all" | Status, query: string) {
+  const statusLabel =
+    statusFilter === "all" ? "全部" : statusFilter === "reported" ? "已报销" : "未报销";
+  const normalized = query.trim();
+  return normalized ? `${statusLabel}-搜索-${normalized}` : statusLabel;
+}
+
 function addMonths(date: Date, amount: number) {
   return new Date(date.getFullYear(), date.getMonth() + amount, 1);
 }
@@ -642,15 +670,106 @@ function EmptyState() {
   );
 }
 
+function ExportPdfReport({
+  currentMonth,
+  filterLabel,
+  expenses,
+  summary,
+}: {
+  currentMonth: Date;
+  filterLabel: string;
+  expenses: Expense[];
+  summary: ExportSummary;
+}) {
+  const cellStyle = {
+    borderBottom: "1px solid #e5e7eb",
+    padding: "10px 12px",
+    verticalAlign: "top",
+  } as const;
+
+  return (
+    <div
+      style={{
+        width: 1160,
+        background: "#ffffff",
+        color: "#111827",
+        fontFamily:
+          'Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+        padding: 32,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 24 }}>
+        <div>
+          <div style={{ fontSize: 24, fontWeight: 700 }}>月度消费明细</div>
+          <div style={{ marginTop: 8, color: "#64748b", fontSize: 14 }}>
+            {getMonthLabel(currentMonth)} · {getDateRangeLabel(currentMonth)} · 当前筛选：{filterLabel}
+          </div>
+        </div>
+        <div style={{ color: "#64748b", fontSize: 13, textAlign: "right" }}>
+          <div>汇率：1 USD = {exchangeRate.toFixed(2)} CNY</div>
+          <div style={{ marginTop: 4 }}>导出时间：{new Date().toLocaleString("zh-CN")}</div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 24 }}>
+        {[
+          ["筛选总金额", formatCny(summary.total), "#111827"],
+          ["已报销", formatCny(summary.reported), "#047857"],
+          ["未报销", formatCny(summary.unreported), "#ea580c"],
+          ["记录数", `${summary.count} 笔`, "#111827"],
+        ].map(([label, value, color]) => (
+          <div key={label} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+            <div style={{ color: "#64748b", fontSize: 12, fontWeight: 600 }}>{label}</div>
+            <div style={{ marginTop: 10, color, fontSize: 22, fontWeight: 700 }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 24, fontSize: 12 }}>
+        <thead>
+          <tr style={{ background: "#f8fafc", color: "#475569", textAlign: "left" }}>
+            {["日期", "描述", "类型", "金额 USD", "金额 CNY", "商家", "报销状态", "备注", "来源"].map((head) => (
+              <th key={head} style={{ ...cellStyle, fontWeight: 700 }}>
+                {head}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {expenses.map((expense) => (
+            <tr key={expense.id}>
+              <td style={{ ...cellStyle, whiteSpace: "nowrap", color: "#475569" }}>{expense.date.replaceAll("-", "/")}</td>
+              <td style={{ ...cellStyle, fontWeight: 600 }}>{expense.description}</td>
+              <td style={cellStyle}>{expense.category}</td>
+              <td style={{ ...cellStyle, textAlign: "right", whiteSpace: "nowrap" }}>
+                {expense.currency === "USD" ? formatUsd(expense.originalAmount) : "-"}
+              </td>
+              <td style={{ ...cellStyle, textAlign: "right", whiteSpace: "nowrap", fontWeight: 700 }}>
+                {formatCny(amountInCny(expense))}
+              </td>
+              <td style={cellStyle}>{expense.merchant}</td>
+              <td style={cellStyle}>{expense.status === "reported" ? "已报销" : "未报销"}</td>
+              <td style={cellStyle}>{expense.note}</td>
+              <td style={cellStyle}>{expense.source}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function App() {
   const [currentMonth, setCurrentMonth] = useState(() => new Date(2024, 4, 1));
   const [expenses, setExpenses] = useState<Expense[]>(seedExpenses);
   const [statusFilter, setStatusFilter] = useState<"all" | Status>("all");
   const [query, setQuery] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [lastUpload, setLastUpload] = useState<UploadRecord | null>(null);
   const [exportNotice, setExportNotice] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pdfReportRef = useRef<HTMLDivElement>(null);
 
   const currentKey = monthKey(currentMonth);
   const monthExpenses = useMemo(
@@ -695,6 +814,22 @@ function App() {
     };
   }, [monthExpenses]);
 
+  const filterLabel = useMemo(() => getFilterLabel(statusFilter, query), [query, statusFilter]);
+
+  const filteredSummary = useMemo(() => {
+    const total = filteredExpenses.reduce((sum, expense) => sum + amountInCny(expense), 0);
+    const reported = filteredExpenses
+      .filter((expense) => expense.status === "reported")
+      .reduce((sum, expense) => sum + amountInCny(expense), 0);
+
+    return {
+      total,
+      reported,
+      unreported: total - reported,
+      count: filteredExpenses.length,
+    };
+  }, [filteredExpenses]);
+
   const nextMonthPreview = useMemo(() => {
     const movable = monthExpenses.filter((expense) => expense.status === "unreported" || expense.recurring);
     const total = movable.reduce((sum, expense) => sum + amountInCny(expense), 0);
@@ -727,9 +862,84 @@ function App() {
     }, 820);
   };
 
-  const handleExportPdf = () => {
-    setExportNotice("正在打开 PDF 导出");
-    window.setTimeout(() => window.print(), 80);
+  const handleExportPdf = async () => {
+    if (isExportingPdf) {
+      return;
+    }
+
+    if (filteredExpenses.length === 0) {
+      setExportNotice("当前筛选结果为空，无法导出 PDF");
+      return;
+    }
+
+    const reportElement = pdfReportRef.current?.firstElementChild as HTMLElement | null;
+    if (!reportElement) {
+      setExportNotice("PDF 报表还未准备好，请稍后再试");
+      return;
+    }
+
+    setIsExportingPdf(true);
+    setExportNotice("正在生成当前筛选结果 PDF...");
+
+    try {
+      const [{ default: html2canvas }, { default: jsPDF }] = await Promise.all([
+        import("html2canvas"),
+        import("jspdf"),
+      ]);
+
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+
+      const canvas = await html2canvas(reportElement, {
+        backgroundColor: "#ffffff",
+        logging: false,
+        scale: 2,
+        useCORS: true,
+        windowWidth: reportElement.scrollWidth,
+      });
+      const pdf = new jsPDF({ format: "a4", orientation: "landscape", unit: "pt" });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 24;
+      const imageWidth = pageWidth - margin * 2;
+      const printableHeight = pageHeight - margin * 2;
+      const pixelsPerPoint = canvas.width / imageWidth;
+      const pageCanvasHeight = Math.floor(printableHeight * pixelsPerPoint);
+      let sourceY = 0;
+      let pageIndex = 0;
+
+      while (sourceY < canvas.height) {
+        const sliceHeight = Math.min(pageCanvasHeight, canvas.height - sourceY);
+        const pageCanvas = document.createElement("canvas");
+        pageCanvas.width = canvas.width;
+        pageCanvas.height = sliceHeight;
+
+        const context = pageCanvas.getContext("2d");
+        if (!context) {
+          throw new Error("无法创建 PDF 画布");
+        }
+
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+        context.drawImage(canvas, 0, sourceY, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight);
+
+        if (pageIndex > 0) {
+          pdf.addPage();
+        }
+
+        pdf.addImage(pageCanvas.toDataURL("image/png"), "PNG", margin, margin, imageWidth, sliceHeight / pixelsPerPoint);
+        sourceY += pageCanvasHeight;
+        pageIndex += 1;
+      }
+
+      const filename = `月度消费-${currentKey}-${sanitizeFilenamePart(filterLabel)}-${getDownloadStamp()}.pdf`;
+      pdf.save(filename);
+      setExportNotice(`已下载 ${filename}`);
+    } catch (error) {
+      console.error(error);
+      setExportNotice("PDF 生成失败，请稍后重试");
+    } finally {
+      setIsExportingPdf(false);
+    }
   };
 
   const markAsReported = (id: string) => {
@@ -787,10 +997,11 @@ function App() {
             <button
               type="button"
               onClick={handleExportPdf}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              disabled={isExportingPdf}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <Download className="size-4" />
-              导出 PDF
+              {isExportingPdf ? "导出中" : "导出 PDF"}
             </button>
           </div>
         </header>
@@ -1144,6 +1355,27 @@ function App() {
           {exportNotice ? <p className="no-print mt-4 text-right text-sm font-medium text-slate-500">{exportNotice}</p> : null}
         </div>
       </section>
+      <div
+        aria-hidden="true"
+        ref={pdfReportRef}
+        style={{
+          backgroundColor: "#ffffff",
+          color: "#111827",
+          fontFamily:
+            'Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+          left: "-12000px",
+          position: "fixed",
+          top: 0,
+          zIndex: -1,
+        }}
+      >
+        <ExportPdfReport
+          currentMonth={currentMonth}
+          expenses={filteredExpenses}
+          filterLabel={filterLabel}
+          summary={filteredSummary}
+        />
+      </div>
     </main>
   );
 }
