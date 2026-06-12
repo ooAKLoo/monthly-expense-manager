@@ -12,7 +12,7 @@ export default defineConfig({
   webServer: skipWebServer
     ? undefined
     : {
-        command: "npm run dev -- --host 0.0.0.0 --port 5176 --strictPort",
+        command: "npm run dev:web -- --host 127.0.0.1 --port 5176 --strictPort",
         url: "http://localhost:5176",
         reuseExistingServer: true,
       },

@@ -4,15 +4,25 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "concurrently -k -n api,web \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "node server/index.mjs",
+    "dev:web": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
+    "test:unit": "node --test server/*.test.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "ali-oss": "^6.23.0",
+    "concurrently": "^10.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
     "lucide-react": "^1.17.0",
+    "multer": "^2.1.1",
+    "pdf-parse": "^2.4.5",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
