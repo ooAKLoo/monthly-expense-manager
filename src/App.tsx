@@ -604,7 +604,11 @@ function SourceCell({
       title={attachment.name}
     >
       {image ? (
-        <ImageIcon className="size-3.5" />
+        <img
+          src={attachmentUrl(attachment)}
+          alt=""
+          className="size-9 rounded-md object-cover"
+        />
       ) : (
         <FileText className="size-3.5" />
       )}
