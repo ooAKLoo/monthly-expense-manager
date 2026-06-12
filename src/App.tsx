@@ -738,7 +738,7 @@ function ExportPdfReport({
       <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 24, fontSize: 12 }}>
         <thead>
           <tr style={{ background: "#f8fafc", color: "#475569", textAlign: "left" }}>
-            {["日期", "描述", "类型", "金额", "商家", "报销状态", "备注", "来源"].map((head) => (
+            {["日期", "描述", "类型", "金额", "商家", "报销状态", "来源", "备注"].map((head) => (
               <th key={head} style={{ ...cellStyle, fontWeight: 700 }}>
                 {head}
               </th>
@@ -761,8 +761,8 @@ function ExportPdfReport({
               </td>
               <td style={cellStyle}>{expense.merchant}</td>
               <td style={cellStyle}>{expense.status === "reported" ? "已报销" : "未报销"}</td>
-              <td style={cellStyle}>{expense.note}</td>
               <td style={cellStyle}>{expense.attachment?.name ?? expense.source}</td>
+              <td style={cellStyle}>{expense.note}</td>
             </tr>
           ))}
         </tbody>
@@ -1461,8 +1461,8 @@ function App() {
                       <col className="w-[170px]" />
                       <col className="w-[180px]" />
                       <col className="w-[150px]" />
-                      <col className="w-[180px]" />
                       <col className="w-[260px]" />
+                      <col className="w-[180px]" />
                     </colgroup>
                     <thead className="bg-slate-50/90 text-xs font-semibold uppercase tracking-normal text-slate-500">
                       <tr>
@@ -1472,8 +1472,8 @@ function App() {
                         <th className="whitespace-nowrap px-4 py-3 text-right">金额</th>
                         <th className="whitespace-nowrap px-4 py-3">商家</th>
                         <th className="whitespace-nowrap px-4 py-3">报销状态</th>
-                        <th className="whitespace-nowrap px-4 py-3">备注</th>
                         <th className="whitespace-nowrap px-4 py-3">来源</th>
+                        <th className="whitespace-nowrap px-4 py-3">备注</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
@@ -1508,11 +1508,11 @@ function App() {
                               onChange={(status) => updateExpense(expense.id, { status })}
                             />
                           </td>
-                          <td className="px-4 py-3 text-slate-500">
-                            <span className="block truncate">{expense.note}</span>
-                          </td>
                           <td className="px-4 py-3">
                             <SourceCell expense={expense} onPreview={setPreviewAttachment} />
+                          </td>
+                          <td className="px-4 py-3 text-slate-500">
+                            <span className="block truncate">{expense.note}</span>
                           </td>
                         </tr>
                       ))}
