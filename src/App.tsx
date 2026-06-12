@@ -600,26 +600,15 @@ function SourceCell({
     <button
       type="button"
       onClick={() => onPreview(attachment)}
-      className="no-print inline-flex w-64 items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-left text-xs font-medium text-slate-600 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+      className="no-print inline-flex items-center gap-1.5 rounded-md bg-transparent px-1 py-1 text-left text-xs font-medium text-slate-500 transition hover:bg-blue-50/60 hover:text-blue-700"
       title={attachment.name}
     >
       {image ? (
-        <img
-          src={attachmentUrl(attachment)}
-          alt=""
-          className="size-8 rounded border border-slate-200 object-cover"
-        />
+        <ImageIcon className="size-3.5" />
       ) : (
-        <span className="flex size-8 items-center justify-center rounded border border-slate-200 bg-slate-50 text-slate-500">
-          <FileText className="size-4" />
-        </span>
+        <FileText className="size-3.5" />
       )}
-      <span className="min-w-0">
-        <span className="block truncate">{attachment.name}</span>
-        <span className="mt-0.5 block text-[11px] font-normal text-slate-400">
-          {image ? "查看大图" : "查看 PDF"}
-        </span>
-      </span>
+      <span>{image ? "上传图片" : "上传 PDF"}</span>
     </button>
   );
 }
