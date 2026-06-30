@@ -130,16 +130,19 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   await expect(app.locator("thead th").filter({ hasText: /^金额$/ })).toBeVisible();
   await expect(app.locator("thead th").filter({ hasText: "金额（原币）" })).toHaveCount(0);
   await expect(app.locator("thead th").filter({ hasText: "金额（CNY）" })).toHaveCount(0);
-  await expect(app.getByText("原币 USD")).toBeVisible();
+  await expect(app.getByText("（原币 $22.80）")).toBeVisible();
   await expect(app.getByText("¥164.39")).toBeVisible();
   await expect(app.locator('button[title="删除"]')).toHaveCount(0);
 
-  const amountInput = app.getByLabel("修改金额").first();
+  await app.getByText("（原币 $22.80）").click();
+  const amountInput = app.locator('input[aria-label="修改金额"]').first();
   await expect(amountInput).toHaveValue("22.8");
   await amountInput.fill("30");
   await expect(amountInput).toHaveValue("30");
   await expect(app.getByText("¥216.30")).toBeVisible();
   await expect(app.locator("p.text-3xl").filter({ hasText: "¥380.30" })).toBeVisible();
+  await amountInput.press("Enter");
+  await expect(app.getByText("（原币 $30.00）")).toBeVisible();
 
   const categorySelect = app.getByLabel("修改消费类型").first();
   await categorySelect.selectOption("差旅");

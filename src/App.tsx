@@ -202,18 +202,6 @@ function parseEditableAmount(value: string) {
   return Number.isFinite(amount) ? Number(amount.toFixed(2)) : null;
 }
 
-function currencyAmountPrefix(currency: Currency) {
-  if (currency === "USD") {
-    return "$";
-  }
-
-  if (currency === "TWD") {
-    return "NT$";
-  }
-
-  return "¥";
-}
-
 function getClipboardFilename(mimeType: string, index: number) {
   const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
   return `clipboard-${getDownloadStamp()}-${index + 1}.${extension}`;
@@ -561,12 +549,22 @@ function AmountCell({
   const [draftAmount, setDraftAmount] = useState(() => formatEditableAmount(expense.originalAmount));
   const [isEditing, setIsEditing] = useState(false);
   const isForeignCurrency = expense.currency !== "CNY";
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!isEditing) {
       setDraftAmount(formatEditableAmount(expense.originalAmount));
     }
   }, [expense.originalAmount, isEditing]);
+
+  useEffect(() => {
+    if (!isEditing) {
+      return;
+    }
+
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [isEditing]);
 
   const updateAmountFromInput = (value: string) => {
     setDraftAmount(value);
@@ -594,30 +592,46 @@ function AmountCell({
     setIsEditing(false);
   };
 
+  if (!isEditing) {
+    const originalNote = formatOriginalAmountNote(expense);
+
+    return (
+      <button
+        type="button"
+        onClick={() => setIsEditing(true)}
+        className="block w-full bg-transparent p-0 text-right"
+        aria-label="修改金额"
+      >
+        <p className="font-semibold text-slate-800">{formatCny(amountInCny(expense))}</p>
+        {originalNote ? <p className="mt-1 text-xs font-medium text-slate-400">{originalNote}</p> : null}
+      </button>
+    );
+  }
+
   return (
-    <div className="flex flex-col items-end gap-1.5 text-right">
+    <div className="text-right">
       {isForeignCurrency ? (
         <p className="font-semibold text-slate-800">{formatCny(amountInCny(expense))}</p>
       ) : null}
-      <label className="inline-flex h-8 w-32 items-center rounded-md bg-white px-2 text-xs font-medium shadow-sm ring-1 ring-slate-200 transition focus-within:ring-4 focus-within:ring-blue-50">
-        <span className="shrink-0 text-slate-400">{currencyAmountPrefix(expense.currency)}</span>
-        <input
-          type="text"
-          inputMode="decimal"
-          aria-label="修改金额"
-          value={draftAmount}
-          onFocus={() => setIsEditing(true)}
-          onChange={(event) => updateAmountFromInput(event.target.value)}
-          onBlur={commitAmountInput}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.currentTarget.blur();
-            }
-          }}
-          className="min-w-0 flex-1 bg-transparent px-1 text-right font-semibold text-slate-800 outline-none"
-        />
-      </label>
-      {isForeignCurrency ? <p className="text-xs font-medium text-slate-400">原币 {expense.currency}</p> : null}
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="decimal"
+        aria-label="修改金额"
+        value={draftAmount}
+        onChange={(event) => updateAmountFromInput(event.target.value)}
+        onBlur={commitAmountInput}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.currentTarget.blur();
+          }
+        }}
+        className={`w-full bg-transparent p-0 text-right outline-none ${
+          isForeignCurrency
+            ? "mt-1 text-xs font-medium text-slate-500"
+            : "font-semibold text-slate-800"
+        }`}
+      />
     </div>
   );
 }
