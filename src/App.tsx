@@ -183,6 +183,37 @@ function formatOriginalAmountNote(expense: Pick<Expense, "currency" | "originalA
   return `（原币 ${formatOriginalAmount(expense)}）`;
 }
 
+function formatEditableAmount(value: number) {
+  const amount = normalizeAmount(value);
+  if (amount === 0) {
+    return "";
+  }
+
+  return amount.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+}
+
+function parseEditableAmount(value: string) {
+  const normalized = value.replace(/,/g, "").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const amount = Math.abs(Number(normalized));
+  return Number.isFinite(amount) ? Number(amount.toFixed(2)) : null;
+}
+
+function currencyAmountPrefix(currency: Currency) {
+  if (currency === "USD") {
+    return "$";
+  }
+
+  if (currency === "TWD") {
+    return "NT$";
+  }
+
+  return "¥";
+}
+
 function getClipboardFilename(mimeType: string, index: number) {
   const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
   return `clipboard-${getDownloadStamp()}-${index + 1}.${extension}`;
@@ -520,13 +551,73 @@ function StatusSelect({
   );
 }
 
-function AmountCell({ expense }: { expense: Expense }) {
-  const originalNote = formatOriginalAmountNote(expense);
+function AmountCell({
+  expense,
+  onAmountChange,
+}: {
+  expense: Expense;
+  onAmountChange: (amount: number) => void;
+}) {
+  const [draftAmount, setDraftAmount] = useState(() => formatEditableAmount(expense.originalAmount));
+  const [isEditing, setIsEditing] = useState(false);
+  const isForeignCurrency = expense.currency !== "CNY";
+
+  useEffect(() => {
+    if (!isEditing) {
+      setDraftAmount(formatEditableAmount(expense.originalAmount));
+    }
+  }, [expense.originalAmount, isEditing]);
+
+  const updateAmountFromInput = (value: string) => {
+    setDraftAmount(value);
+
+    const nextAmount = parseEditableAmount(value);
+    if (nextAmount === null || nextAmount <= 0 || nextAmount === expense.originalAmount) {
+      return;
+    }
+
+    onAmountChange(nextAmount);
+  };
+
+  const commitAmountInput = () => {
+    const nextAmount = parseEditableAmount(draftAmount);
+    if (nextAmount === null || nextAmount <= 0) {
+      setDraftAmount(formatEditableAmount(expense.originalAmount));
+      setIsEditing(false);
+      return;
+    }
+
+    if (nextAmount !== expense.originalAmount) {
+      onAmountChange(nextAmount);
+    }
+    setDraftAmount(formatEditableAmount(nextAmount));
+    setIsEditing(false);
+  };
 
   return (
-    <div className="text-right">
-      <p className="font-semibold text-slate-800">{formatCny(amountInCny(expense))}</p>
-      {originalNote ? <p className="mt-1 text-xs font-medium text-slate-400">{originalNote}</p> : null}
+    <div className="flex flex-col items-end gap-1.5 text-right">
+      {isForeignCurrency ? (
+        <p className="font-semibold text-slate-800">{formatCny(amountInCny(expense))}</p>
+      ) : null}
+      <label className="inline-flex h-8 w-32 items-center rounded-md bg-white px-2 text-xs font-medium shadow-sm ring-1 ring-slate-200 transition focus-within:ring-4 focus-within:ring-blue-50">
+        <span className="shrink-0 text-slate-400">{currencyAmountPrefix(expense.currency)}</span>
+        <input
+          type="text"
+          inputMode="decimal"
+          aria-label="修改金额"
+          value={draftAmount}
+          onFocus={() => setIsEditing(true)}
+          onChange={(event) => updateAmountFromInput(event.target.value)}
+          onBlur={commitAmountInput}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.currentTarget.blur();
+            }
+          }}
+          className="min-w-0 flex-1 bg-transparent px-1 text-right font-semibold text-slate-800 outline-none"
+        />
+      </label>
+      {isForeignCurrency ? <p className="text-xs font-medium text-slate-400">原币 {expense.currency}</p> : null}
     </div>
   );
 }
@@ -1121,7 +1212,10 @@ function App() {
     }
   };
 
-  const updateExpense = (id: string, changes: Partial<Pick<Expense, "category" | "status">>) => {
+  const updateExpense = (
+    id: string,
+    changes: Partial<Pick<Expense, "category" | "status" | "originalAmount">>,
+  ) => {
     setExpenses((previous) =>
       previous.map((expense) => (expense.id === id ? { ...expense, ...changes } : expense)),
     );
@@ -1490,7 +1584,10 @@ function App() {
                             />
                           </td>
                           <td className="whitespace-nowrap px-4 py-3">
-                            <AmountCell expense={expense} />
+                            <AmountCell
+                              expense={expense}
+                              onAmountChange={(originalAmount) => updateExpense(expense.id, { originalAmount })}
+                            />
                           </td>
                           <td className="px-4 py-3">
                             <span className="block truncate">{expense.merchant}</span>
