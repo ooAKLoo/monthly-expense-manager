@@ -167,10 +167,13 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   await expect(page.getByRole("button", { name: "关闭预览" })).toBeVisible();
   await page.getByRole("button", { name: "关闭预览" }).click();
 
-  await app.getByRole("button", { name: /下月预览/ }).click();
+  await app.getByRole("button", { name: "结转到下月" }).click();
 
   await expect(app.getByRole("button", { name: "选择月份" })).toContainText("2024年6月");
   await expect(app.getByText("Uber Receipt（结转）", { exact: true })).toBeVisible();
+  const carriedRow = app.locator("tbody tr").filter({ hasText: "Uber Receipt（结转）" }).first();
+  await expect(carriedRow).toContainText("2024/06/01");
+  await expect(carriedRow).toContainText("原日期 2024/05/28");
 
   await app.getByPlaceholder("搜索商家、备注").fill("Uber Receipt（结转）");
   await expect(app.getByText("共 1 条记录")).toBeVisible();

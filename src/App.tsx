@@ -1228,14 +1228,15 @@ function App() {
     const movedItems = nextMonthPreview.items
       .map((expense) => {
         const id = `carry-${targetKey}-${expense.id}`;
+        const carriedDate = expense.recurring ? dateInMonth(expense.date, target) : `${targetKey}-01`;
         return {
           ...expense,
           id,
-          date: dateInMonth(expense.date, target),
+          date: carriedDate,
           description: expense.recurring ? expense.description : `${expense.description}（结转）`,
           status: "unreported" as Status,
           source: expense.recurring ? "固定月度" : "自动迁移",
-          note: expense.recurring ? "下月固定花费" : "上月未报销",
+          note: expense.recurring ? "下月固定花费" : `上月未报销，原日期 ${expense.date.replaceAll("-", "/")}`,
         };
       })
       .filter((expense) => !existingIds.has(expense.id));
@@ -1657,24 +1658,20 @@ function App() {
             <div className="p-5">
               <div className="flex items-center gap-2">
                 <RefreshCw className="size-5 text-blue-600" />
-                <h2 className="text-base font-semibold text-slate-950">自动迁移规则</h2>
+                <h2 className="text-base font-semibold text-slate-950">结转规则</h2>
               </div>
               <ul className="mt-4 space-y-2 text-sm text-slate-500">
                 <li className="flex gap-2">
                   <span className="mt-2 size-1.5 rounded-full bg-slate-400" />
-                  未报销的消费将自动迁移到下个月
+                  未报销消费可手动结转到下个月
                 </li>
                 <li className="flex gap-2">
                   <span className="mt-2 size-1.5 rounded-full bg-slate-400" />
-                  月度固定消费将自动转入下个月
+                  月度固定消费结转时保留原日号
                 </li>
               </ul>
             </div>
-            <button
-              type="button"
-              onClick={rollToNextMonth}
-              className="group flex flex-col gap-4 border-t border-slate-100 bg-white p-5 text-left transition hover:bg-slate-50/70 sm:flex-row sm:items-center sm:justify-between lg:border-l lg:border-t-0"
-            >
+            <div className="flex flex-col gap-4 border-t border-slate-100 bg-white p-5 sm:flex-row sm:items-center sm:justify-between lg:border-l lg:border-t-0">
               <div className="flex items-start gap-3">
                 <CalendarDays className="mt-0.5 size-5 text-blue-600" />
                 <div>
@@ -1690,8 +1687,16 @@ function App() {
                   </div>
                 </div>
               </div>
-              <ChevronRight className="hidden size-6 text-slate-400 transition group-hover:translate-x-0.5 group-hover:text-slate-700 sm:block" />
-            </button>
+              <button
+                type="button"
+                onClick={rollToNextMonth}
+                disabled={nextMonthPreview.count === 0}
+                className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md bg-blue-600 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+              >
+                <ChevronRight className="size-4" />
+                结转到下月
+              </button>
+            </div>
           </section>
 
           {exportNotice ? <p className="no-print mt-4 text-right text-sm font-medium text-slate-500">{exportNotice}</p> : null}
