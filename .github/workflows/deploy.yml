@@ -1,0 +1,119 @@
+name: CI and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: monthly-expense-manager-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      RELEASE_ARCHIVE: monthly-expense-manager-release.tar.gz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Build
+        run: npm run build
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Run e2e tests
+        run: npm run test:e2e
+
+      - name: Pack release
+        run: tar -czf "$RELEASE_ARCHIVE" dist server package.json package-lock.json
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/monthly_expense_deploy
+          chmod 600 ~/.ssh/monthly_expense_deploy
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload release
+        run: |
+          set -euo pipefail
+          REMOTE_ARCHIVE="/tmp/monthly-expense-manager-${GITHUB_SHA}.tar.gz"
+          scp -i ~/.ssh/monthly_expense_deploy "$RELEASE_ARCHIVE" "$DEPLOY_USER@$DEPLOY_HOST:$REMOTE_ARCHIVE"
+
+      - name: Deploy release
+        run: |
+          set -euo pipefail
+          RELEASE_ID="$(date -u +'%Y%m%d%H%M%S')-${GITHUB_SHA::7}"
+          REMOTE_ARCHIVE="/tmp/monthly-expense-manager-${GITHUB_SHA}.tar.gz"
+
+          ssh -i ~/.ssh/monthly_expense_deploy "$DEPLOY_USER@$DEPLOY_HOST" \
+            "RELEASE_ID='$RELEASE_ID' REMOTE_ARCHIVE='$REMOTE_ARCHIVE' bash -se" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          APP_DIR="/opt/monthly-expense-manager"
+          RELEASES_DIR="$APP_DIR/releases"
+          RELEASE_DIR="$RELEASES_DIR/$RELEASE_ID"
+          SERVICE_NAME="monthly-expense-manager"
+          HEALTH_URL="http://127.0.0.1:8790/api/health"
+          PREVIOUS_RELEASE="$(readlink -f "$APP_DIR/current" || true)"
+
+          mkdir -p "$RELEASE_DIR" "$APP_DIR/data"
+          tar -xzf "$REMOTE_ARCHIVE" -C "$RELEASE_DIR"
+
+          if [ -f "$APP_DIR/current/.env.local" ]; then
+            cp "$APP_DIR/current/.env.local" "$RELEASE_DIR/.env.local"
+          else
+            echo "Missing $APP_DIR/current/.env.local; refusing to deploy without production env."
+            exit 1
+          fi
+
+          cd "$RELEASE_DIR"
+          npm ci --omit=dev
+
+          ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
+
+          if ! systemctl restart "$SERVICE_NAME"; then
+            echo "Service restart failed; rolling back."
+            if [ -n "$PREVIOUS_RELEASE" ]; then
+              ln -sfn "$PREVIOUS_RELEASE" "$APP_DIR/current"
+              systemctl restart "$SERVICE_NAME" || true
+            fi
+            exit 1
+          fi
+
+          sleep 3
+          if ! systemctl is-active --quiet "$SERVICE_NAME" || ! curl -fsS "$HEALTH_URL" >/dev/null; then
+            echo "Health check failed; rolling back."
+            if [ -n "$PREVIOUS_RELEASE" ]; then
+              ln -sfn "$PREVIOUS_RELEASE" "$APP_DIR/current"
+              systemctl restart "$SERVICE_NAME" || true
+            fi
+            exit 1
+          fi
+
+          rm -f "$REMOTE_ARCHIVE"
+          ls -1dt "$RELEASES_DIR"/* 2>/dev/null | tail -n +9 | xargs -r rm -rf
+          echo "Deployed $RELEASE_ID"
+          REMOTE_SCRIPT
