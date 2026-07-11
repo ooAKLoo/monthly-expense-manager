@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   getMonthDateRange,
+  getInlinePreviewMimeType,
   isInlinePreviewAttachment,
   normalizeAttachmentList,
   normalizeAttachmentPayload,
@@ -68,6 +69,11 @@ test("normalizes multiple attachments, deduplicates ids and rebuilds bill-local 
 test("only trusted raster images and PDFs can render inline", () => {
   assert.equal(isInlinePreviewAttachment({ mimeType: "image/png" }), true);
   assert.equal(isInlinePreviewAttachment({ mimeType: "application/pdf" }), true);
+  assert.equal(
+    getInlinePreviewMimeType({ name: "收据.PDF", mimeType: "application/octet-stream" }),
+    "application/pdf",
+  );
+  assert.equal(isInlinePreviewAttachment({ name: "收据.pdf.exe", mimeType: "application/octet-stream" }), false);
   assert.equal(isInlinePreviewAttachment({ mimeType: "image/svg+xml" }), false);
   assert.equal(isInlinePreviewAttachment({ mimeType: "text/html" }), false);
   assert.equal(isInlinePreviewAttachment({ mimeType: "application/zip" }), false);

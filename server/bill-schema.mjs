@@ -75,9 +75,23 @@ export function normalizeAttachmentList(attachments, billId = "") {
   return [...unique.values()];
 }
 
+export function getInlinePreviewMimeType(attachment) {
+  const mimeType = typeof attachment?.mimeType === "string" ? attachment.mimeType.trim().toLowerCase() : "";
+  if (mimeType === "application/pdf") {
+    return "application/pdf";
+  }
+  if (/^image\/(?:png|jpe?g|webp|gif|avif|bmp)$/i.test(mimeType)) {
+    return mimeType;
+  }
+
+  // 部分浏览器会把本地 PDF 上传为 application/octet-stream。PDF 以固定
+  // Content-Type + nosniff 内嵌，扩展名兜底不会让 HTML/SVG 在同源页面执行。
+  const filename = [attachment?.name, attachment?.filename]
+    .find((value) => typeof value === "string" && value.trim())
+    ?.trim();
+  return filename && /\.pdf$/i.test(filename) ? "application/pdf" : "";
+}
+
 export function isInlinePreviewAttachment(attachment) {
-  return (
-    attachment?.mimeType === "application/pdf" ||
-    /^image\/(?:png|jpe?g|webp|gif|avif|bmp)$/i.test(attachment?.mimeType ?? "")
-  );
+  return Boolean(getInlinePreviewMimeType(attachment));
 }

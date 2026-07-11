@@ -16,11 +16,16 @@ import {
 } from "./expense-normalizer.mjs";
 import {
   getMonthDateRange,
-  isInlinePreviewAttachment,
+  getInlinePreviewMimeType,
   normalizeAttachmentList,
   normalizeAttachmentPayload,
   normalizeDateRange,
 } from "./bill-schema.mjs";
+import {
+  getReceiptFallbackDate,
+  normalizeRecognizedReceiptDate,
+  normalizeReferenceDate,
+} from "./receipt-date.mjs";
 import { callArkResponses, callChatCompletions } from "./model-clients.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -68,7 +73,7 @@ const config = {
 const billsDir = path.join(config.dataDir, "bills");
 const attachmentsDir = path.join(config.dataDir, "attachments");
 const modelEvaluationsDir = path.join(config.dataDir, "model-evaluations");
-const receiptPromptVersion = "v4-aud-final-payment-date-range";
+const receiptPromptVersion = "v5-upload-reference-date";
 const maxBillAttachmentCount = 200;
 const maxBillAttachmentBytes = 500 * 1024 * 1024;
 const maxAttachmentUploadRequestsPerMinute = 10;
@@ -152,8 +157,9 @@ app.get("/api/bills/:billId/attachments/:attachmentId", async (request, response
     return;
   }
 
-  const canPreviewInline = request.query.download !== "1" && isInlinePreviewAttachment(attachment);
-  response.type(canPreviewInline ? attachment.mimeType : "application/octet-stream");
+  const inlinePreviewMimeType = getInlinePreviewMimeType(attachment);
+  const canPreviewInline = request.query.download !== "1" && Boolean(inlinePreviewMimeType);
+  response.type(canPreviewInline ? inlinePreviewMimeType : "application/octet-stream");
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Cache-Control", "private, max-age=86400");
   response.setHeader(
@@ -210,6 +216,7 @@ app.post("/api/bills/:billId/analyze-expenses", upload.array("files"), async (re
     const month = typeof request.body.month === "string" ? request.body.month : "";
     const rangeStart = normalizeRangeDate(request.body.rangeStart, month);
     const rangeEnd = normalizeRangeDate(request.body.rangeEnd, month);
+    const referenceDate = normalizeReferenceDate(request.body.referenceDate, month);
     const exchangeRate = Number(request.body.exchangeRate) || 7.21;
     const audExchangeRate = Number(request.body.audExchangeRate) || 4.7;
     const twdExchangeRate = Number(request.body.twdExchangeRate) || 0.23;
@@ -229,6 +236,7 @@ app.post("/api/bills/:billId/analyze-expenses", upload.array("files"), async (re
             month,
             rangeStart,
             rangeEnd,
+            referenceDate,
             exchangeRate,
             audExchangeRate,
             twdExchangeRate,
@@ -879,6 +887,7 @@ function analysisOptionsFromBody(body) {
     month,
     rangeStart: normalizeRangeDate(body?.rangeStart, month),
     rangeEnd: normalizeRangeDate(body?.rangeEnd, month),
+    referenceDate: normalizeReferenceDate(body?.referenceDate, month),
     exchangeRate: Number(body?.exchangeRate) || 7.21,
     audExchangeRate: Number(body?.audExchangeRate) || 4.7,
     twdExchangeRate: Number(body?.twdExchangeRate) || 0.23,
@@ -941,6 +950,7 @@ async function analyzeImage(file, options, provider) {
     month: options.month,
     rangeStart: options.rangeStart,
     rangeEnd: options.rangeEnd,
+    referenceDate: options.referenceDate,
     exchangeRate: options.exchangeRate,
     audExchangeRate: options.audExchangeRate,
     twdExchangeRate: options.twdExchangeRate,
@@ -980,6 +990,7 @@ async function analyzeImage(file, options, provider) {
     options.attachment,
     file.mimetype,
     options.rangeEnd,
+    options.referenceDate,
   );
 }
 
@@ -1000,6 +1011,7 @@ async function analyzePdf(file, options, provider) {
     month: options.month,
     rangeStart: options.rangeStart,
     rangeEnd: options.rangeEnd,
+    referenceDate: options.referenceDate,
     exchangeRate: options.exchangeRate,
     audExchangeRate: options.audExchangeRate,
     twdExchangeRate: options.twdExchangeRate,
@@ -1030,6 +1042,7 @@ async function analyzePdf(file, options, provider) {
     options.attachment,
     file.mimetype,
     options.rangeEnd,
+    options.referenceDate,
   );
 }
 
@@ -1066,6 +1079,7 @@ function createReceiptPrompt({
   month,
   rangeStart,
   rangeEnd,
+  referenceDate,
   exchangeRate,
   audExchangeRate,
   twdExchangeRate,
@@ -1076,13 +1090,12 @@ function createReceiptPrompt({
     /^\d{4}-\d{2}-\d{2}$/.test(rangeStart ?? "") &&
     /^\d{4}-\d{2}-\d{2}$/.test(rangeEnd ?? "") &&
     rangeStart <= rangeEnd;
-  const fallbackDateHint = validRange
-    ? `；当前日期范围 ${rangeStart} 至 ${rangeEnd}，无法判断具体日期时使用结束日 ${rangeEnd}`
-    : "";
+  const fallbackDate = getReceiptFallbackDate(month, validRange ? rangeEnd : "", referenceDate);
+  const referenceDateHint = referenceDate || fallbackDate;
   return `请从${mode === "image" ? "消费截图/票据图片" : "PDF 文本"}中识别消费记录并整理成 JSON。
 文件名：${filename}
 月份提示：${monthHint}
-日期提示：优先使用票据中的真实日期${fallbackDateHint}
+日期提示：只使用票据中能够证明实际支付/扣款的日期；“Today/今天”按上传参考日 ${referenceDateHint} 处理；“下次扣费、续费、到期、周期结束”等计划日期不能作为消费日期。没有实际支付日期时使用 ${fallbackDate}。
 汇率：1 USD = ${exchangeRate} CNY；1 AUD = ${audExchangeRate} CNY；1 TWD = ${twdExchangeRate} CNY
 
 输出格式必须是严格 JSON：
@@ -1111,7 +1124,7 @@ function createReceiptPrompt({
 - 只返回 JSON，不要 Markdown。
 - 如果票据中有多笔消费，全部列出。
 - status 默认 unreported，除非票据明确写已报销。
-- date 缺失时使用日期/月份提示内最可能日期；仍无法判断时使用日期范围结束日，未提供范围时使用该月最后一天。
+- date 缺失、只出现 Today/今天、日期含糊，或只出现未来的续费/到期计划日期时，使用上述上传参考日/兜底日期；不要因为筛选范围的结束日而猜测消费日期。
 - category 必须从枚举中选择。
 - 金额是原始币种金额，不要把 USD、AUD 或 TWD 改写成 CNY；前端会换算人民币。
 - originalAmount 和 amountText 必须对应消费者最终实际支付/扣款的金额。优先识别“实付、实付款、实际支付、支付金额、付款金额、已支付、成交金额、Total paid、Amount charged、Grand total”。
@@ -1167,18 +1180,30 @@ function tryParseJson(value) {
   }
 }
 
-function normalizeExpenses(payload, filename, month, attachment, mimeType = "", rangeEnd = "") {
+function normalizeExpenses(
+  payload,
+  filename,
+  month,
+  attachment,
+  mimeType = "",
+  rangeEnd = "",
+  referenceDate = "",
+) {
   const rawExpenses = Array.isArray(payload) ? payload : payload.expenses;
   if (!Array.isArray(rawExpenses)) {
     throw new Error("模型 JSON 中缺少 expenses 数组");
   }
 
-  const fallbackDate = getFallbackDate(month, rangeEnd);
+  const fallbackDate = getReceiptFallbackDate(month, rangeEnd, referenceDate);
   return rawExpenses.map((expense, index) => {
     const source = (attachment?.mimeType || mimeType).startsWith("image/") ? "上传图片" : "上传 PDF";
     return {
       id: `ai-${createId(8)}-${index}`,
-      date: normalizeDate(expense.date, fallbackDate),
+      date: normalizeRecognizedReceiptDate(expense.date, {
+        month,
+        fallbackDate,
+        referenceDate,
+      }),
       description: stringOrFallback(expense.description, "消费记录"),
       category: normalizeCategory(expense.category),
       originalAmount: resolveOriginalAmount(expense),
@@ -1197,24 +1222,6 @@ function normalizeExpenses(payload, filename, month, attachment, mimeType = "", 
       evidenceText: stringOrFallback(expense.evidenceText, ""),
     };
   }).filter((expense) => !isLikelyFalsePositiveExpense(expense));
-}
-
-function getFallbackDate(month, rangeEnd = "") {
-  const match = typeof month === "string" ? month.match(/^(\d{4})-(\d{2})$/) : null;
-  if (!match) {
-    return new Date().toISOString().slice(0, 10);
-  }
-
-  const year = Number(match[1]);
-  const monthIndex = Number(match[2]);
-  if (
-    /^\d{4}-\d{2}-\d{2}$/.test(rangeEnd) &&
-    rangeEnd.slice(0, 7) === `${year}-${String(monthIndex).padStart(2, "0")}`
-  ) {
-    return rangeEnd;
-  }
-  const lastDay = new Date(year, monthIndex, 0).getDate();
-  return `${year}-${String(monthIndex).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
 }
 
 function normalizeDate(value, fallback) {

@@ -283,6 +283,11 @@ function monthKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function getBrowserToday() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
 function expenseMonthKey(date: string) {
   return date.slice(0, 7);
 }
@@ -513,6 +518,7 @@ async function analyzeUploadedFiles(
   formData.append("month", monthKey(currentMonth));
   formData.append("rangeStart", dateRange.start);
   formData.append("rangeEnd", dateRange.end);
+  formData.append("referenceDate", getBrowserToday());
   formData.append("exchangeRate", String(exchangeRate));
   formData.append("audExchangeRate", String(audExchangeRate));
   formData.append("twdExchangeRate", String(twdExchangeRate));
@@ -551,6 +557,7 @@ async function reanalyzeStoredAttachment(
   currentMonth: Date,
   dateRange: DateRange,
   billId: string,
+  referenceDate: string,
 ) {
   const response = await fetch(
     apiUrl(`bills/${billId}/attachments/${attachment.id}/reanalyze-expenses`),
@@ -561,6 +568,7 @@ async function reanalyzeStoredAttachment(
         month: monthKey(currentMonth),
         rangeStart: dateRange.start,
         rangeEnd: dateRange.end,
+        referenceDate,
         exchangeRate,
         audExchangeRate,
         twdExchangeRate,
@@ -1533,10 +1541,10 @@ function AttachmentPreview({
             />
           ) : pdf ? (
             <iframe
-              title={attachment.name}
+              title={`PDF 预览：${attachment.name}`}
               src={url}
-              sandbox=""
               tabIndex={0}
+              referrerPolicy="no-referrer"
               className="h-[78vh] w-full rounded-md bg-white"
             />
           ) : (
@@ -2208,7 +2216,14 @@ function App() {
     setRepairingAttachmentId(attachment.id);
     setExportNotice("正在用当前主模型重新识别原附件...");
     try {
-      const result = await reanalyzeStoredAttachment(attachment, currentMonth, dateRange, billId);
+      const existingDate = expenses.find((expense) => expense.id === expenseId)?.date ?? getBrowserToday();
+      const result = await reanalyzeStoredAttachment(
+        attachment,
+        currentMonth,
+        dateRange,
+        billId,
+        existingDate,
+      );
       setExpenses((previous) => {
         const targetIndex = previous.findIndex((expense) => expense.id === expenseId);
         if (targetIndex < 0) {

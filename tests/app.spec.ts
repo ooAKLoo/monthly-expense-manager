@@ -670,3 +670,73 @@ test("自动保存串行提交，旧快照不会覆盖新状态", async ({ page 
   await expect.poll(() => putCount).toBe(2);
   expect(savedPayloads.at(-1)?.expenses[0].status).toBe("reported");
 });
+
+test("PDF 附件可点击后直接内嵌预览", async ({ page }) => {
+  const expense = {
+    id: "pdf-preview-record",
+    date: "2024-05-20",
+    description: "PDF 附件测试",
+    category: "办公",
+    originalAmount: 88,
+    currency: "CNY",
+    merchant: "测试商家",
+    status: "unreported",
+    note: "",
+    source: "上传 PDF",
+    attachment: {
+      id: "pdf-preview-attachment",
+      name: "补充票据.PDF",
+      // 复现部分浏览器上传 PDF 时给出的通用 MIME 类型。
+      mimeType: "application/octet-stream",
+      size: 128,
+      url: "api/bills/pdf-preview-test/attachments/pdf-preview-attachment",
+    },
+  };
+
+  await page.route("**/api/bills/pdf-preview-test", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          bill: {
+            id: "pdf-preview-test",
+            currentMonth: "2024-05",
+            dateRange: { start: "2024-05-01", end: "2024-05-31" },
+            expenses: [expense],
+          },
+        }),
+      });
+      return;
+    }
+
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.route(
+    "**/api/bills/pdf-preview-test/attachments/pdf-preview-attachment",
+    async (route) => {
+      expect(route.request().url()).not.toContain("download=1");
+      await route.fulfill({
+        contentType: "application/pdf",
+        headers: {
+          "Content-Disposition": "inline; filename*=UTF-8''%E8%A1%A5%E5%85%85%E7%A5%A8%E6%8D%AE.PDF",
+          "X-Content-Type-Options": "nosniff",
+        },
+        body: "%PDF-1.4\n%%EOF",
+      });
+    },
+  );
+
+  await page.goto("/#bill=pdf-preview-test");
+  const previewButton = page.getByRole("button", { name: "预览附件 补充票据.PDF" });
+  await previewButton.click();
+
+  const dialog = page.getByRole("dialog", { name: "补充票据.PDF" });
+  await expect(dialog).toBeVisible();
+  const preview = dialog.getByTitle("PDF 预览：补充票据.PDF");
+  await expect(preview).toHaveAttribute(
+    "src",
+    /api\/bills\/pdf-preview-test\/attachments\/pdf-preview-attachment$/,
+  );
+  await expect(preview).not.toHaveAttribute("sandbox");
+  await expect(dialog.getByRole("link", { name: "下载" })).toHaveAttribute("href", /download=1/);
+});
