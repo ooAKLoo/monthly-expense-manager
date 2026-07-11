@@ -156,6 +156,7 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   await page.getByRole("option", { name: "已报销", exact: true }).click();
   await expect(statusSelect).toContainText("已报销");
   await statusSelect.press("ArrowDown");
+  await expect(statusSelect).toHaveAttribute("aria-activedescendant", /option-1$/);
   await statusSelect.press("Enter");
   await expect(statusSelect).toContainText("未报销");
   await statusSelect.click();
