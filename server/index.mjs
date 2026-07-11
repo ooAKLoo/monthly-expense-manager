@@ -14,6 +14,13 @@ import {
   normalizeConfidence,
   resolveOriginalAmount,
 } from "./expense-normalizer.mjs";
+import {
+  getMonthDateRange,
+  isInlinePreviewAttachment,
+  normalizeAttachmentList,
+  normalizeAttachmentPayload,
+  normalizeDateRange,
+} from "./bill-schema.mjs";
 import { callArkResponses, callChatCompletions } from "./model-clients.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -61,7 +68,14 @@ const config = {
 const billsDir = path.join(config.dataDir, "bills");
 const attachmentsDir = path.join(config.dataDir, "attachments");
 const modelEvaluationsDir = path.join(config.dataDir, "model-evaluations");
-const receiptPromptVersion = "v3-aud-final-payment";
+const receiptPromptVersion = "v4-aud-final-payment-date-range";
+const maxBillAttachmentCount = 200;
+const maxBillAttachmentBytes = 500 * 1024 * 1024;
+const maxAttachmentUploadRequestsPerMinute = 10;
+const maxGlobalAttachmentUploadRequestsPerMinute = 30;
+const attachmentUploadReservations = new Map();
+const attachmentUploadHistory = new Map();
+let globalAttachmentUploadHistory = [];
 
 await fs.mkdir(billsDir, { recursive: true });
 await fs.mkdir(attachmentsDir, { recursive: true });
@@ -138,13 +152,40 @@ app.get("/api/bills/:billId/attachments/:attachmentId", async (request, response
     return;
   }
 
-  response.type(attachment.mimeType);
+  const canPreviewInline = request.query.download !== "1" && isInlinePreviewAttachment(attachment);
+  response.type(canPreviewInline ? attachment.mimeType : "application/octet-stream");
+  response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Cache-Control", "private, max-age=86400");
   response.setHeader(
     "Content-Disposition",
-    `inline; filename*=UTF-8''${encodeURIComponent(attachment.name)}`,
+    `${canPreviewInline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(attachment.name)}`,
   );
   response.sendFile(path.join(getBillAttachmentsDir(billId), attachment.filename));
+});
+
+app.post("/api/bills/:billId/attachments", upload.array("files"), async (request, response) => {
+  try {
+    const billId = normalizeId(request.params.billId);
+    if (!billId) {
+      response.status(400).json({ error: "账单 ID 无效" });
+      return;
+    }
+
+    const files = request.files ?? [];
+    if (!Array.isArray(files) || files.length === 0) {
+      response.status(400).json({ error: "请至少选择一个附件" });
+      return;
+    }
+
+    const attachments = await storeUploadedAttachments(billId, files);
+    response.status(201).json({ attachments });
+  } catch (error) {
+    if (sendAttachmentPolicyError(error, response)) {
+      return;
+    }
+    console.error(error);
+    response.status(500).json({ error: "附件上传服务异常" });
+  }
 });
 
 app.post("/api/bills/:billId/analyze-expenses", upload.array("files"), async (request, response) => {
@@ -167,6 +208,8 @@ app.post("/api/bills/:billId/analyze-expenses", upload.array("files"), async (re
     }
 
     const month = typeof request.body.month === "string" ? request.body.month : "";
+    const rangeStart = normalizeRangeDate(request.body.rangeStart, month);
+    const rangeEnd = normalizeRangeDate(request.body.rangeEnd, month);
     const exchangeRate = Number(request.body.exchangeRate) || 7.21;
     const audExchangeRate = Number(request.body.audExchangeRate) || 4.7;
     const twdExchangeRate = Number(request.body.twdExchangeRate) || 0.23;
@@ -175,14 +218,17 @@ app.post("/api/bills/:billId/analyze-expenses", upload.array("files"), async (re
     const expenses = [];
     const warnings = [];
     const usedProviders = new Set();
+    const attachments = await storeUploadedAttachments(billId, files);
 
-    for (const file of files) {
-      const attachment = await saveAttachment(billId, file);
+    for (const [index, file] of files.entries()) {
+      const attachment = attachments[index];
       try {
         const result = await analyzeFileWithFallback(
           file,
           {
             month,
+            rangeStart,
+            rangeEnd,
             exchangeRate,
             audExchangeRate,
             twdExchangeRate,
@@ -196,6 +242,7 @@ app.post("/api/bills/:billId/analyze-expenses", upload.array("files"), async (re
         usedProviders.add(result.provider);
         expenses.push(...result.expenses);
       } catch (error) {
+        await deleteStoredAttachment(billId, attachment.id);
         warnings.push(`${file.originalname}: ${error instanceof Error ? error.message : "识别失败"}`);
       }
     }
@@ -217,6 +264,9 @@ app.post("/api/bills/:billId/analyze-expenses", upload.array("files"), async (re
       },
     });
   } catch (error) {
+    if (sendAttachmentPolicyError(error, response)) {
+      return;
+    }
     console.error(error);
     response.status(500).json({ error: "消费识别服务异常" });
   }
@@ -363,6 +413,21 @@ app.post(
   },
 );
 
+app.use((error, _request, response, next) => {
+  if (!(error instanceof multer.MulterError)) {
+    next(error);
+    return;
+  }
+
+  const message =
+    error.code === "LIMIT_FILE_SIZE"
+      ? "单个文件不能超过 10MB"
+      : error.code === "LIMIT_FILE_COUNT"
+        ? "每次最多上传 8 个文件"
+        : "上传文件不符合限制";
+  response.status(400).json({ error: message });
+});
+
 const distDir = path.join(rootDir, "dist");
 app.use(express.static(distDir));
 app.use((request, response, next) => {
@@ -388,9 +453,11 @@ function normalizeId(value) {
 
 function createDefaultBill(id) {
   const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   return {
     id,
-    currentMonth: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`,
+    currentMonth,
+    dateRange: getMonthDateRange(currentMonth),
     expenses: [],
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
@@ -428,22 +495,26 @@ async function saveBill(bill) {
 function normalizeBillPayload(id, payload) {
   const now = new Date().toISOString();
   const currentMonth =
-    typeof payload?.currentMonth === "string" && /^\d{4}-\d{2}$/.test(payload.currentMonth)
+    typeof payload?.currentMonth === "string" && /^\d{4}-(?:0[1-9]|1[0-2])$/.test(payload.currentMonth)
       ? payload.currentMonth
       : createDefaultBill(id).currentMonth;
 
   return {
     id,
     currentMonth,
+    dateRange: normalizeDateRange(payload?.dateRange, currentMonth),
     expenses: Array.isArray(payload?.expenses)
-      ? payload.expenses.map(normalizeExpensePayload).filter((expense) => !isLikelyFalsePositiveExpense(expense))
+      ? payload.expenses
+          .map((expense, index) => normalizeExpensePayload(expense, index, id))
+          .filter((expense) => !isLikelyFalsePositiveExpense(expense))
       : [],
     createdAt: typeof payload?.createdAt === "string" ? payload.createdAt : now,
     updatedAt: now,
   };
 }
 
-function normalizeExpensePayload(expense, index) {
+function normalizeExpensePayload(expense, index, billId) {
+  const attachment = normalizeAttachmentPayload(expense?.attachment, billId);
   return {
     id: stringOrFallback(expense?.id, `expense-${Date.now()}-${index}`),
     date: normalizeDate(expense?.date, new Date().toISOString().slice(0, 10)),
@@ -457,7 +528,10 @@ function normalizeExpensePayload(expense, index) {
     source: stringOrFallback(expense?.source, "上传票据"),
     recurring: Boolean(expense?.recurring),
     confidence: normalizeConfidence(expense?.confidence),
-    attachment: normalizeAttachmentPayload(expense?.attachment),
+    attachment,
+    attachments: normalizeAttachmentList(expense?.attachments, billId).filter(
+      (item) => item.id !== attachment?.id,
+    ),
     amountText: stringOrFallback(expense?.amountText, ""),
     currencyEvidence: stringOrFallback(expense?.currencyEvidence, ""),
     paymentMethod: stringOrFallback(expense?.paymentMethod, ""),
@@ -465,27 +539,157 @@ function normalizeExpensePayload(expense, index) {
   };
 }
 
-function normalizeAttachmentPayload(attachment) {
-  if (!attachment || typeof attachment !== "object") {
-    return null;
+function getBillAttachmentsDir(billId) {
+  return path.join(attachmentsDir, billId);
+}
+
+function createAttachmentPolicyError(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function sendAttachmentPolicyError(error, response) {
+  if (!Number.isInteger(error?.statusCode)) {
+    return false;
+  }
+  response.status(error.statusCode).json({ error: error.message });
+  return true;
+}
+
+function registerAttachmentUploadAttempt(billId) {
+  const now = Date.now();
+  const windowStart = now - 60_000;
+  globalAttachmentUploadHistory = globalAttachmentUploadHistory.filter(
+    (timestamp) => timestamp >= windowStart,
+  );
+  if (globalAttachmentUploadHistory.length >= maxGlobalAttachmentUploadRequestsPerMinute) {
+    throw createAttachmentPolicyError("附件上传服务繁忙，请稍后再试", 429);
+  }
+  const recent = (attachmentUploadHistory.get(billId) ?? []).filter(
+    (timestamp) => timestamp >= windowStart,
+  );
+  if (recent.length >= maxAttachmentUploadRequestsPerMinute) {
+    throw createAttachmentPolicyError("附件上传过于频繁，请稍后再试", 429);
+  }
+  recent.push(now);
+  globalAttachmentUploadHistory.push(now);
+  attachmentUploadHistory.set(billId, recent);
+
+  if (attachmentUploadHistory.size > 5_000) {
+    for (const [id, timestamps] of attachmentUploadHistory) {
+      if (timestamps.every((timestamp) => timestamp < windowStart)) {
+        attachmentUploadHistory.delete(id);
+      }
+    }
+  }
+}
+
+async function getBillAttachmentUsage(billId) {
+  const directory = getBillAttachmentsDir(billId);
+  let entries;
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return { count: 0, bytes: 0 };
+    }
+    throw error;
   }
 
-  const id = normalizeId(attachment.id);
-  if (!id) {
-    return null;
-  }
-
+  const files = entries.filter((entry) => entry.isFile());
+  const sizes = await Promise.all(
+    files.map(async (entry) => {
+      try {
+        return (await fs.stat(path.join(directory, entry.name))).size;
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          return 0;
+        }
+        throw error;
+      }
+    }),
+  );
   return {
-    id,
-    name: stringOrFallback(attachment.name, "上传附件"),
-    mimeType: stringOrFallback(attachment.mimeType, "application/octet-stream"),
-    size: Number.isFinite(Number(attachment.size)) ? Number(attachment.size) : 0,
-    url: stringOrFallback(attachment.url, ""),
+    count: Math.ceil(files.length / 2),
+    bytes: sizes.reduce((sum, size) => sum + size, 0),
   };
 }
 
-function getBillAttachmentsDir(billId) {
-  return path.join(attachmentsDir, billId);
+async function reserveAttachmentUpload(billId, files) {
+  registerAttachmentUploadAttempt(billId);
+  const incoming = {
+    count: files.length,
+    bytes: files.reduce((sum, file) => sum + Number(file.size || 0), 0),
+  };
+  const usage = await getBillAttachmentUsage(billId);
+  const reserved = attachmentUploadReservations.get(billId) ?? { count: 0, bytes: 0 };
+
+  if (usage.count + reserved.count + incoming.count > maxBillAttachmentCount) {
+    throw createAttachmentPolicyError(
+      `单个账单最多保存 ${maxBillAttachmentCount} 个附件`,
+      413,
+    );
+  }
+  if (usage.bytes + reserved.bytes + incoming.bytes > maxBillAttachmentBytes) {
+    throw createAttachmentPolicyError("单个账单附件总容量不能超过 500MB", 413);
+  }
+
+  attachmentUploadReservations.set(billId, {
+    count: reserved.count + incoming.count,
+    bytes: reserved.bytes + incoming.bytes,
+  });
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    const current = attachmentUploadReservations.get(billId) ?? { count: 0, bytes: 0 };
+    const next = {
+      count: Math.max(0, current.count - incoming.count),
+      bytes: Math.max(0, current.bytes - incoming.bytes),
+    };
+    if (next.count === 0 && next.bytes === 0) {
+      attachmentUploadReservations.delete(billId);
+    } else {
+      attachmentUploadReservations.set(billId, next);
+    }
+  };
+}
+
+async function deleteStoredAttachment(billId, attachmentId) {
+  const directory = getBillAttachmentsDir(billId);
+  const metadataPath = path.join(directory, `${attachmentId}.json`);
+  try {
+    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+    await Promise.allSettled([
+      metadata?.filename ? fs.unlink(path.join(directory, metadata.filename)) : Promise.resolve(),
+      fs.unlink(metadataPath),
+    ]);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+async function storeUploadedAttachments(billId, files) {
+  const release = await reserveAttachmentUpload(billId, files);
+  const attachments = [];
+  try {
+    for (const file of files) {
+      attachments.push(await saveAttachment(billId, file));
+    }
+    return attachments;
+  } catch (error) {
+    await Promise.allSettled(
+      attachments.map((attachment) => deleteStoredAttachment(billId, attachment.id)),
+    );
+    throw error;
+  } finally {
+    release();
+  }
 }
 
 async function saveAttachment(billId, file) {
@@ -494,7 +698,7 @@ async function saveAttachment(billId, file) {
   await fs.mkdir(billAttachmentsDir, { recursive: true });
   const safeOriginalName = file.originalname.replace(/[^\w.\-\u4e00-\u9fa5]+/g, "-");
   const extension = path.extname(safeOriginalName) || mimeExtension(file.mimetype);
-  const filename = `${id}${extension}`;
+  const filename = `${id}.data${extension}`;
   const attachment = {
     id,
     name: file.originalname,
@@ -504,12 +708,15 @@ async function saveAttachment(billId, file) {
     url: `api/bills/${billId}/attachments/${id}`,
   };
 
-  await fs.writeFile(path.join(billAttachmentsDir, filename), file.buffer);
-  await fs.writeFile(
-    path.join(billAttachmentsDir, `${id}.json`),
-    JSON.stringify(attachment, null, 2),
-    "utf8",
-  );
+  const filePath = path.join(billAttachmentsDir, filename);
+  const metadataPath = path.join(billAttachmentsDir, `${id}.json`);
+  try {
+    await fs.writeFile(filePath, file.buffer);
+    await fs.writeFile(metadataPath, JSON.stringify(attachment, null, 2), "utf8");
+  } catch (error) {
+    await Promise.allSettled([fs.unlink(filePath), fs.unlink(metadataPath)]);
+    throw error;
+  }
 
   return normalizeAttachmentPayload(attachment);
 }
@@ -583,6 +790,9 @@ function mimeExtension(mimeType) {
   if (mimeType === "application/pdf") {
     return ".pdf";
   }
+  if (mimeType === "image/jpeg") {
+    return ".jpg";
+  }
   if (mimeType === "image/png") {
     return ".png";
   }
@@ -592,7 +802,7 @@ function mimeExtension(mimeType) {
   if (mimeType === "image/gif") {
     return ".gif";
   }
-  return ".jpg";
+  return ".bin";
 }
 
 function normalizeProvider(value) {
@@ -664,12 +874,26 @@ function isOssConfigured() {
 }
 
 function analysisOptionsFromBody(body) {
+  const month = typeof body?.month === "string" ? body.month : "";
   return {
-    month: typeof body?.month === "string" ? body.month : "",
+    month,
+    rangeStart: normalizeRangeDate(body?.rangeStart, month),
+    rangeEnd: normalizeRangeDate(body?.rangeEnd, month),
     exchangeRate: Number(body?.exchangeRate) || 7.21,
     audExchangeRate: Number(body?.audExchangeRate) || 4.7,
     twdExchangeRate: Number(body?.twdExchangeRate) || 0.23,
   };
+}
+
+function normalizeRangeDate(value, month) {
+  if (typeof value !== "string" || !/^\d{4}-(?:0[1-9]|1[0-2])-\d{2}$/.test(value)) {
+    return "";
+  }
+  if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(month)) {
+    return "";
+  }
+  const range = getMonthDateRange(month);
+  return value >= range.start && value <= range.end ? value : "";
 }
 
 async function analyzeFileWithFallback(file, options, provider) {
@@ -715,6 +939,8 @@ async function analyzeImage(file, options, provider) {
   const prompt = createReceiptPrompt({
     filename: file.originalname,
     month: options.month,
+    rangeStart: options.rangeStart,
+    rangeEnd: options.rangeEnd,
     exchangeRate: options.exchangeRate,
     audExchangeRate: options.audExchangeRate,
     twdExchangeRate: options.twdExchangeRate,
@@ -753,6 +979,7 @@ async function analyzeImage(file, options, provider) {
     options.month,
     options.attachment,
     file.mimetype,
+    options.rangeEnd,
   );
 }
 
@@ -771,6 +998,8 @@ async function analyzePdf(file, options, provider) {
   const prompt = `${createReceiptPrompt({
     filename: file.originalname,
     month: options.month,
+    rangeStart: options.rangeStart,
+    rangeEnd: options.rangeEnd,
     exchangeRate: options.exchangeRate,
     audExchangeRate: options.audExchangeRate,
     twdExchangeRate: options.twdExchangeRate,
@@ -800,6 +1029,7 @@ async function analyzePdf(file, options, provider) {
     options.month,
     options.attachment,
     file.mimetype,
+    options.rangeEnd,
   );
 }
 
@@ -834,15 +1064,25 @@ async function uploadToOss(file) {
 function createReceiptPrompt({
   filename,
   month,
+  rangeStart,
+  rangeEnd,
   exchangeRate,
   audExchangeRate,
   twdExchangeRate,
   mode,
 }) {
   const monthHint = month ? `${month} 月` : "当前月份";
+  const validRange =
+    /^\d{4}-\d{2}-\d{2}$/.test(rangeStart ?? "") &&
+    /^\d{4}-\d{2}-\d{2}$/.test(rangeEnd ?? "") &&
+    rangeStart <= rangeEnd;
+  const fallbackDateHint = validRange
+    ? `；当前日期范围 ${rangeStart} 至 ${rangeEnd}，无法判断具体日期时使用结束日 ${rangeEnd}`
+    : "";
   return `请从${mode === "image" ? "消费截图/票据图片" : "PDF 文本"}中识别消费记录并整理成 JSON。
 文件名：${filename}
 月份提示：${monthHint}
+日期提示：优先使用票据中的真实日期${fallbackDateHint}
 汇率：1 USD = ${exchangeRate} CNY；1 AUD = ${audExchangeRate} CNY；1 TWD = ${twdExchangeRate} CNY
 
 输出格式必须是严格 JSON：
@@ -871,7 +1111,7 @@ function createReceiptPrompt({
 - 只返回 JSON，不要 Markdown。
 - 如果票据中有多笔消费，全部列出。
 - status 默认 unreported，除非票据明确写已报销。
-- date 缺失时使用月份提示内最可能日期；仍无法判断时使用该月最后一天。
+- date 缺失时使用日期/月份提示内最可能日期；仍无法判断时使用日期范围结束日，未提供范围时使用该月最后一天。
 - category 必须从枚举中选择。
 - 金额是原始币种金额，不要把 USD、AUD 或 TWD 改写成 CNY；前端会换算人民币。
 - originalAmount 和 amountText 必须对应消费者最终实际支付/扣款的金额。优先识别“实付、实付款、实际支付、支付金额、付款金额、已支付、成交金额、Total paid、Amount charged、Grand total”。
@@ -927,13 +1167,13 @@ function tryParseJson(value) {
   }
 }
 
-function normalizeExpenses(payload, filename, month, attachment, mimeType = "") {
+function normalizeExpenses(payload, filename, month, attachment, mimeType = "", rangeEnd = "") {
   const rawExpenses = Array.isArray(payload) ? payload : payload.expenses;
   if (!Array.isArray(rawExpenses)) {
     throw new Error("模型 JSON 中缺少 expenses 数组");
   }
 
-  const fallbackDate = getFallbackDate(month);
+  const fallbackDate = getFallbackDate(month, rangeEnd);
   return rawExpenses.map((expense, index) => {
     const source = (attachment?.mimeType || mimeType).startsWith("image/") ? "上传图片" : "上传 PDF";
     return {
@@ -950,6 +1190,7 @@ function normalizeExpenses(payload, filename, month, attachment, mimeType = "") 
       recurring: Boolean(expense.recurring),
       confidence: normalizeConfidence(expense.confidence),
       attachment,
+      attachments: [],
       amountText: stringOrFallback(expense.amountText, ""),
       currencyEvidence: stringOrFallback(expense.currencyEvidence, ""),
       paymentMethod: stringOrFallback(expense.paymentMethod, ""),
@@ -958,7 +1199,7 @@ function normalizeExpenses(payload, filename, month, attachment, mimeType = "") 
   }).filter((expense) => !isLikelyFalsePositiveExpense(expense));
 }
 
-function getFallbackDate(month) {
+function getFallbackDate(month, rangeEnd = "") {
   const match = typeof month === "string" ? month.match(/^(\d{4})-(\d{2})$/) : null;
   if (!match) {
     return new Date().toISOString().slice(0, 10);
@@ -966,6 +1207,12 @@ function getFallbackDate(month) {
 
   const year = Number(match[1]);
   const monthIndex = Number(match[2]);
+  if (
+    /^\d{4}-\d{2}-\d{2}$/.test(rangeEnd) &&
+    rangeEnd.slice(0, 7) === `${year}-${String(monthIndex).padStart(2, "0")}`
+  ) {
+    return rangeEnd;
+  }
   const lastDay = new Date(year, monthIndex, 0).getDate();
   return `${year}-${String(monthIndex).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
 }

@@ -7,6 +7,7 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
     "base64",
   );
   let analyzeCallCount = 0;
+  let latestSavedBill: Record<string, unknown> | null = null;
 
   await page.route("**/api/bills/e2e-test", async (route) => {
     if (route.request().method() === "GET") {
@@ -23,9 +24,36 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
       return;
     }
 
+    latestSavedBill = await route.request().postDataJSON();
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ bill: await route.request().postDataJSON() }),
+      body: JSON.stringify({ bill: latestSavedBill }),
+    });
+  });
+
+  await page.route("**/api/bills/e2e-test/attachments", async (route) => {
+    expect(route.request().method()).toBe("POST");
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        attachments: [
+          {
+            id: "att-contract",
+            name: "contract.docx",
+            mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size: 8,
+            url: "api/bills/e2e-test/attachments/att-contract",
+          },
+          {
+            id: "att-archive",
+            name: "evidence.zip",
+            mimeType: "application/zip",
+            size: 7,
+            url: "api/bills/e2e-test/attachments/att-archive",
+          },
+        ],
+      }),
     });
   });
 
@@ -113,9 +141,9 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   await page.goto("/#bill=e2e-test");
 
   await expect(app.getByRole("heading", { name: "月度消费管理" })).toBeVisible();
-  await expect(app.getByRole("button", { name: "选择月份" })).toContainText("2024年5月");
-  await expect(app.getByText("当月总金额（人民币）")).toBeVisible();
-  await expect(app.getByText("当前月份暂无消费记录")).toBeVisible();
+  await expect(app.getByText("2024年5月", { exact: true })).toBeVisible();
+  await expect(app.getByText("区间总金额（人民币）")).toBeVisible();
+  await expect(app.getByText("所选日期范围暂无消费记录")).toBeVisible();
 
   const uploadZone = app.getByRole("button", { name: "上传消费截图或 PDF" });
   const dropData = await page.evaluateHandle(() => {
@@ -133,6 +161,32 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   await expect(app.getByText("（原币 $22.80）")).toBeVisible();
   await expect(app.getByText("¥164.39")).toBeVisible();
   await expect(app.locator('button[title="删除"]')).toHaveCount(0);
+
+  await app.getByRole("button", { name: /修改日期范围/ }).click();
+  const rangeDialog = page.getByRole("dialog", { name: "精确日期范围" });
+  await expect(rangeDialog.getByLabel("开始日期")).toBeFocused();
+  await rangeDialog.getByLabel("开始日期").fill("2024-05-28");
+  await rangeDialog.getByLabel("结束日期").fill("2024-05-28");
+  await rangeDialog.getByRole("button", { name: "应用范围" }).click();
+  await expect(app.getByRole("button", { name: /修改日期范围/ })).toContainText(
+    "2024/05/28 - 2024/05/28",
+  );
+  await expect.poll(() => {
+    const savedRange = latestSavedBill?.dateRange as { start?: string; end?: string } | undefined;
+    return `${savedRange?.start ?? ""}/${savedRange?.end ?? ""}`;
+  }).toBe("2024-05-28/2024-05-28");
+  await expect(app.getByText("Uber Receipt 2", { exact: true })).toHaveCount(0);
+  await expect(app.getByText("共 1 条记录")).toBeVisible();
+
+  await app.getByRole("button", { name: /修改日期范围/ }).click();
+  await rangeDialog.getByRole("button", { name: "恢复整月" }).click();
+  await rangeDialog.getByRole("button", { name: "应用范围" }).click();
+  await expect(app.getByText("Uber Receipt 2", { exact: true })).toBeVisible();
+  await app.getByRole("button", { name: /修改日期范围/ }).click();
+  const searchInput = app.getByPlaceholder("搜索商家、备注");
+  await searchInput.click();
+  await expect(searchInput).toBeFocused();
+  await expect(rangeDialog).toHaveCount(0);
 
   await app.getByText("（原币 $22.80）").click();
   const amountInput = app.locator('input[aria-label="修改金额"]').first();
@@ -182,11 +236,34 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
 
   await sourceButtons.first().click();
   await expect(page.getByRole("button", { name: "关闭预览" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "关闭预览" })).toBeFocused();
   await page.getByRole("button", { name: "关闭预览" }).click();
+
+  const attachmentChooser = page.waitForEvent("filechooser");
+  await app.getByRole("button", { name: "为 Uber Receipt 添加附件" }).click();
+  const chooser = await attachmentChooser;
+  await chooser.setFiles([
+    { name: "contract.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", buffer: Buffer.from("contract") },
+    { name: "evidence.zip", mimeType: "application/zip", buffer: Buffer.from("archive") },
+  ]);
+  await expect(app.getByText("已为该记录添加 2 个附件")).toBeVisible();
+  const uberRow = app.locator("tbody tr").filter({ hasText: "Uber Receipt" }).first();
+  await expect(uberRow.getByText("3 个")).toBeVisible();
+  await expect(uberRow.getByRole("link", { name: "下载附件 contract.docx" })).toBeVisible();
+  await expect(uberRow.getByRole("link", { name: "下载附件 evidence.zip" })).toBeVisible();
+  expect(analyzeCallCount).toBe(2);
+  await expect(page.locator('iframe[title="contract.docx"]')).toHaveCount(0);
+  await app.getByPlaceholder("搜索商家、备注").fill("contract.docx");
+  await expect(app.getByText("共 1 条记录")).toBeVisible();
+  await app.getByPlaceholder("搜索商家、备注").fill("");
+  await expect.poll(() => {
+    const expenses = (latestSavedBill?.expenses ?? []) as Array<{ id?: string; attachments?: unknown[] }>;
+    return expenses.find((expense) => expense.id === "test-uber-1")?.attachments?.length ?? 0;
+  }).toBe(2);
 
   await app.getByRole("button", { name: "结转到下月" }).click();
 
-  await expect(app.getByRole("button", { name: "选择月份" })).toContainText("2024年6月");
+  await expect(app.getByText("2024年6月", { exact: true })).toBeVisible();
   await expect(app.getByText("Uber Receipt（结转）", { exact: true })).toBeVisible();
   const carriedRow = app.locator("tbody tr").filter({ hasText: "Uber Receipt（结转）" }).first();
   await expect(carriedRow).toContainText("2024/06/01");
@@ -200,7 +277,7 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   const download = await downloadPromise;
 
   expect(download.suggestedFilename()).toMatch(
-    /^月度消费-2024-06-全部-搜索-UberReceipt（结转）-\d+\.pdf$/,
+    /^消费明细-2024-06-01_至_2024-06-30-全部-搜索-UberReceipt（结转）-\d+\.pdf$/,
   );
 });
 
@@ -298,6 +375,9 @@ test("澳元按 AUD 汇率展示且订单使用实付金额", async ({ page }) =
   await page.route(
     "**/api/bills/aud-test/attachments/att-glue/reanalyze-expenses",
     async (route) => {
+      const body = await route.request().postDataJSON();
+      expect(body.rangeStart).toBe("2026-07-01");
+      expect(body.rangeEnd).toBe("2026-07-31");
       await route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({
@@ -357,4 +437,236 @@ test("澳元按 AUD 汇率展示且订单使用实付金额", async ({ page }) =
   await page.getByRole("button", { name: "重新识别并修复" }).click();
   await expect(tableBody.getByText("¥35.90")).toBeVisible();
   await expect(page.getByText(/doubao-seed-2-0-lite-260428/)).toBeVisible();
+});
+
+test("重新识别结转记录不会删除共享附件的原始记录", async ({ page }) => {
+  const attachment = {
+    id: "shared-receipt",
+    name: "shared.png",
+    mimeType: "image/png",
+    size: 68,
+    url: "api/bills/reanalyze-shared/attachments/shared-receipt",
+  };
+  const originalExpenses = [
+    {
+      id: "original-record",
+      date: "2026-06-23",
+      description: "原始消费",
+      category: "购物",
+      originalAmount: 10,
+      currency: "CNY",
+      merchant: "共享商家",
+      status: "reported",
+      note: "原记录",
+      source: "上传图片",
+      attachment,
+    },
+    {
+      id: "carried-record",
+      date: "2026-07-01",
+      description: "原始消费（结转）",
+      category: "购物",
+      originalAmount: 10,
+      currency: "CNY",
+      merchant: "共享商家",
+      status: "unreported",
+      note: "结转记录",
+      source: "自动迁移",
+      attachment,
+    },
+  ];
+  let savedExpenses = originalExpenses;
+
+  await page.route("**/api/bills/reanalyze-shared", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          bill: {
+            id: "reanalyze-shared",
+            currentMonth: "2026-07",
+            dateRange: { start: "2026-07-01", end: "2026-07-31" },
+            expenses: originalExpenses,
+          },
+        }),
+      });
+      return;
+    }
+    const bill = await route.request().postDataJSON();
+    savedExpenses = bill.expenses;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ bill }) });
+  });
+  await page.route("**/api/bills/reanalyze-shared/attachments/shared-receipt", async (route) => {
+    await route.fulfill({ body: Buffer.from("image"), contentType: "image/png" });
+  });
+  await page.route(
+    "**/api/bills/reanalyze-shared/attachments/shared-receipt/reanalyze-expenses",
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          expenses: [
+            {
+              ...originalExpenses[1],
+              id: "model-repaired",
+              originalAmount: 18.8,
+              evidenceText: "实付款 ¥18.80",
+            },
+          ],
+          warnings: [],
+          models: { active: "doubao-seed-2-0-lite-260428" },
+        }),
+      });
+    },
+  );
+
+  await page.goto("/#bill=reanalyze-shared");
+  await page.locator('button[title="shared.png"]').click();
+  await page.getByRole("button", { name: "重新识别并修复" }).click();
+  await expect(page.locator("tbody.divide-y").getByText("¥18.80")).toBeVisible();
+  await expect.poll(
+    () => savedExpenses.find((expense) => expense.id === "carried-record")?.originalAmount,
+  ).toBe(18.8);
+  await expect.poll(() => savedExpenses.map((expense) => expense.id).sort()).toEqual([
+    "carried-record",
+    "original-record",
+  ]);
+});
+
+test("支持跨页全选、Shift 连选和确认后批量删除", async ({ page }) => {
+  const expenses = Array.from({ length: 10 }, (_, index) => ({
+    id: `selection-${index + 1}`,
+    date: `2024-05-${String(20 - index).padStart(2, "0")}`,
+    description: `记录 ${index + 1}`,
+    category: "办公",
+    originalAmount: index + 1,
+    currency: "CNY",
+    merchant: `商家 ${index + 1}`,
+    status: index % 2 === 0 ? "reported" : "unreported",
+    note: "选择测试",
+    source: "手动记录",
+  }));
+  let latestSavedExpenses = expenses;
+
+  await page.route("**/api/bills/selection-test", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          bill: {
+            id: "selection-test",
+            currentMonth: "2024-05",
+            dateRange: { start: "2024-05-01", end: "2024-05-31" },
+            expenses,
+          },
+        }),
+      });
+      return;
+    }
+
+    const bill = await route.request().postDataJSON();
+    latestSavedExpenses = bill.expenses;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ bill }) });
+  });
+
+  await page.goto("/#bill=selection-test");
+  const app = page.locator(".print-shell");
+  const selectAll = app.getByRole("checkbox", { name: "全选当前筛选结果" });
+  await selectAll.click();
+  await expect(selectAll).toHaveAttribute("aria-checked", "true");
+  await expect(app.getByText("已选择 10 条")).toBeVisible();
+
+  await app.getByRole("button", { name: "下一页" }).click();
+  await expect(app.getByRole("checkbox", { name: /记录 9$/ })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await app.getByRole("button", { name: "取消选择" }).click();
+  await app.getByRole("button", { name: "上一页" }).click();
+
+  await app.getByRole("checkbox", { name: /记录 1$/ }).click();
+  await app
+    .getByRole("checkbox", { name: /记录 4$/ })
+    .click({ modifiers: ["Shift"] });
+  await expect(app.getByText("已选择 4 条")).toBeVisible();
+  await expect(selectAll).toHaveAttribute("aria-checked", "mixed");
+
+  await app.getByRole("button", { name: "删除 4 条" }).click();
+  const deleteDialog = page.getByRole("dialog", { name: /删除 4 条消费记录/ });
+  await expect(deleteDialog).toContainText("删除 4 条消费记录");
+  await expect(deleteDialog.getByRole("button", { name: "取消" })).toBeFocused();
+  await deleteDialog.getByRole("button", { name: "取消" }).click();
+  await expect(app.getByText("记录 1", { exact: true })).toBeVisible();
+
+  await app.getByRole("button", { name: "删除 4 条" }).click();
+  await deleteDialog.getByRole("button", { name: "确认删除" }).click();
+  await expect(app.getByText("记录 1", { exact: true })).toHaveCount(0);
+  await expect(app.getByText("记录 4", { exact: true })).toHaveCount(0);
+  await expect(app.getByText("共 6 条记录")).toBeVisible();
+  await expect.poll(() => latestSavedExpenses.map((expense) => expense.id)).not.toContain(
+    "selection-1",
+  );
+  expect(latestSavedExpenses).toHaveLength(6);
+});
+
+test("自动保存串行提交，旧快照不会覆盖新状态", async ({ page }) => {
+  const expense = {
+    id: "save-order-record",
+    date: "2024-05-20",
+    description: "保存顺序测试",
+    category: "办公",
+    originalAmount: 88,
+    currency: "CNY",
+    merchant: "测试商家",
+    status: "unreported",
+    note: "",
+    source: "手动记录",
+  };
+  let putCount = 0;
+  const savedPayloads: Array<{ expenses: Array<{ status: string }> }> = [];
+  let markFirstStarted!: () => void;
+  let releaseFirst!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    markFirstStarted = resolve;
+  });
+  const firstRelease = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+
+  await page.route("**/api/bills/save-order-test", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          bill: {
+            id: "save-order-test",
+            currentMonth: "2024-05",
+            dateRange: { start: "2024-05-01", end: "2024-05-31" },
+            expenses: [expense],
+          },
+        }),
+      });
+      return;
+    }
+
+    putCount += 1;
+    savedPayloads.push(await route.request().postDataJSON());
+    if (putCount === 1) {
+      markFirstStarted();
+      await firstRelease;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+
+  await page.goto("/#bill=save-order-test");
+  await firstStarted;
+  const statusSelect = page.getByRole("combobox", { name: /修改报销状态/ });
+  await statusSelect.click();
+  await page.getByRole("option", { name: "已报销", exact: true }).click();
+  await page.waitForTimeout(650);
+  expect(putCount).toBe(1);
+
+  releaseFirst();
+  await expect.poll(() => putCount).toBe(2);
+  expect(savedPayloads.at(-1)?.expenses[0].status).toBe("reported");
 });

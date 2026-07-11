@@ -14,6 +14,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import {
+  AlertTriangle,
   ArrowDownUp,
   ArrowLeft,
   ArrowRight,
@@ -22,6 +23,7 @@ import {
   BriefcaseBusiness,
   Building2,
   CalendarDays,
+  CalendarRange,
   Check,
   ChevronDown,
   ChevronRight,
@@ -32,17 +34,24 @@ import {
   Copy,
   Download,
   FileText,
+  File as FileIcon,
   Home,
   Image as ImageIcon,
   Plane,
+  Paperclip,
+  Plus,
   ReceiptText,
   RefreshCw,
   Repeat2,
   Search,
   ShoppingBag,
   SlidersHorizontal,
+  Square,
+  SquareCheckBig,
+  SquareMinus,
   Sparkles,
   TrainFront,
+  Trash2,
   X,
 } from "lucide-react";
 
@@ -64,6 +73,7 @@ type Expense = {
   recurring?: boolean;
   confidence?: number;
   attachment?: Attachment | null;
+  attachments?: Attachment[];
   amountText?: string;
   currencyEvidence?: string;
   paymentMethod?: string;
@@ -98,9 +108,20 @@ type Attachment = {
   url: string;
 };
 
+type AttachmentPreviewTarget = {
+  expenseId: string;
+  attachment: Attachment;
+};
+
+type DateRange = {
+  start: string;
+  end: string;
+};
+
 type Bill = {
   id: string;
   currentMonth: string;
+  dateRange: DateRange;
   expenses: Expense[];
 };
 
@@ -270,11 +291,38 @@ function getMonthLabel(date: Date) {
   return `${date.getFullYear()}年${date.getMonth() + 1}月`;
 }
 
-function getDateRangeLabel(date: Date) {
-  const start = `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, "0")}/01`;
+function getMonthDateRange(date: Date): DateRange {
+  const month = monthKey(date);
   const endDate = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-  const end = `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, "0")}/${endDate}`;
-  return `${start} - ${end}`;
+  return {
+    start: `${month}-01`,
+    end: `${month}-${String(endDate).padStart(2, "0")}`,
+  };
+}
+
+function normalizeDateRange(value: unknown, currentMonth: Date): DateRange {
+  const fallback = getMonthDateRange(currentMonth);
+  if (!value || typeof value !== "object") {
+    return fallback;
+  }
+
+  const candidate = value as Partial<DateRange>;
+  const start = typeof candidate.start === "string" ? candidate.start.replaceAll("/", "-") : "";
+  const end = typeof candidate.end === "string" ? candidate.end.replaceAll("/", "-") : "";
+  const currentKey = monthKey(currentMonth);
+  const valid =
+    /^\d{4}-\d{2}-\d{2}$/.test(start) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(end) &&
+    start.slice(0, 7) === currentKey &&
+    end.slice(0, 7) === currentKey &&
+    start >= fallback.start &&
+    end <= fallback.end &&
+    start <= end;
+  return valid ? { start, end } : fallback;
+}
+
+function getDateRangeLabel(dateRange: DateRange) {
+  return `${dateRange.start.replaceAll("-", "/")} - ${dateRange.end.replaceAll("-", "/")}`;
 }
 
 function getDownloadStamp(date = new Date()) {
@@ -320,7 +368,7 @@ function currentMonthDate() {
 }
 
 function parseMonthDate(value: string) {
-  const match = value.match(/^(\d{4})-(\d{2})$/);
+  const match = value.match(/^(\d{4})-(0[1-9]|1[0-2])$/);
   if (!match) {
     return currentMonthDate();
   }
@@ -367,8 +415,35 @@ function attachmentUrl(attachment: Attachment) {
   return new URL(attachment.url.replace(/^\/+/, ""), apiUrl("../")).toString();
 }
 
+function attachmentDownloadUrl(attachment: Attachment) {
+  const url = new URL(attachmentUrl(attachment));
+  url.searchParams.set("download", "1");
+  return url.toString();
+}
+
 function isImageAttachment(attachment: Attachment) {
-  return attachment.mimeType.startsWith("image/");
+  return /^image\/(?:png|jpe?g|webp|gif|avif|bmp)$/i.test(attachment.mimeType);
+}
+
+function isPdfAttachment(attachment: Attachment) {
+  return attachment.mimeType === "application/pdf" || /\.pdf$/i.test(attachment.name);
+}
+
+function canPreviewAttachment(attachment: Attachment) {
+  return isImageAttachment(attachment) || isPdfAttachment(attachment);
+}
+
+function getExpenseAttachments(expense: Pick<Expense, "attachment" | "attachments">) {
+  const unique = new Map<string, Attachment>();
+  if (expense.attachment) {
+    unique.set(expense.attachment.id, expense.attachment);
+  }
+  for (const attachment of expense.attachments ?? []) {
+    if (attachment) {
+      unique.set(attachment.id, attachment);
+    }
+  }
+  return [...unique.values()];
 }
 
 async function loadBill(billId: string): Promise<Bill> {
@@ -378,9 +453,14 @@ async function loadBill(billId: string): Promise<Bill> {
     throw new Error(payload.error ?? "账单加载失败");
   }
 
+  const currentMonth =
+    typeof payload.bill.currentMonth === "string"
+      ? parseMonthDate(payload.bill.currentMonth)
+      : currentMonthDate();
   return {
     id: billId,
-    currentMonth: typeof payload.bill.currentMonth === "string" ? payload.bill.currentMonth : monthKey(currentMonthDate()),
+    currentMonth: monthKey(currentMonth),
+    dateRange: normalizeDateRange(payload.bill.dateRange, currentMonth),
     expenses: Array.isArray(payload.bill.expenses)
       ? payload.bill.expenses.map((expense, index) => normalizeApiExpense(expense, index))
       : [],
@@ -402,10 +482,37 @@ async function saveBill(bill: Bill) {
   }
 }
 
-async function analyzeUploadedFiles(files: File[], currentMonth: Date, billId: string) {
+async function uploadExpenseAttachments(files: File[], billId: string) {
+  const formData = new FormData();
+  files.forEach((file) => formData.append("files", file));
+  const response = await fetch(apiUrl(`bills/${billId}/attachments`), {
+    method: "POST",
+    body: formData,
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    attachments?: unknown[];
+    error?: string;
+  };
+  if (!response.ok) {
+    throw new Error(payload.error ?? "附件上传失败");
+  }
+
+  return (payload.attachments ?? [])
+    .map(normalizeAttachment)
+    .filter((attachment): attachment is Attachment => Boolean(attachment));
+}
+
+async function analyzeUploadedFiles(
+  files: File[],
+  currentMonth: Date,
+  dateRange: DateRange,
+  billId: string,
+) {
   const formData = new FormData();
   files.forEach((file) => formData.append("files", file));
   formData.append("month", monthKey(currentMonth));
+  formData.append("rangeStart", dateRange.start);
+  formData.append("rangeEnd", dateRange.end);
   formData.append("exchangeRate", String(exchangeRate));
   formData.append("audExchangeRate", String(audExchangeRate));
   formData.append("twdExchangeRate", String(twdExchangeRate));
@@ -442,6 +549,7 @@ async function analyzeUploadedFiles(files: File[], currentMonth: Date, billId: s
 async function reanalyzeStoredAttachment(
   attachment: Attachment,
   currentMonth: Date,
+  dateRange: DateRange,
   billId: string,
 ) {
   const response = await fetch(
@@ -451,6 +559,8 @@ async function reanalyzeStoredAttachment(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         month: monthKey(currentMonth),
+        rangeStart: dateRange.start,
+        rangeEnd: dateRange.end,
         exchangeRate,
         audExchangeRate,
         twdExchangeRate,
@@ -501,6 +611,7 @@ function normalizeApiExpense(
         ? Math.max(0, Math.min(100, Math.round(expense.confidence)))
         : 80,
     attachment: normalizeAttachment(expense.attachment),
+    attachments: normalizeAttachments(expense.attachments),
     amountText:
       typeof expense.amountText === "string" && expense.amountText ? expense.amountText : "",
     currencyEvidence:
@@ -536,6 +647,21 @@ function normalizeAttachment(value: unknown): Attachment | null {
     size: Number.isFinite(Number(attachment.size)) ? Number(attachment.size) : 0,
     url: attachment.url,
   };
+}
+
+function normalizeAttachments(value: unknown): Attachment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const unique = new Map<string, Attachment>();
+  for (const item of value) {
+    const attachment = normalizeAttachment(item);
+    if (attachment && !unique.has(attachment.id)) {
+      unique.set(attachment.id, attachment);
+    }
+  }
+  return [...unique.values()];
 }
 
 function normalizeCategory(value: unknown): Category {
@@ -756,6 +882,189 @@ function MenuSelect<T extends string>({
   );
 }
 
+function DateRangePicker({
+  currentMonth,
+  value,
+  onChange,
+}: {
+  currentMonth: Date;
+  value: DateRange;
+  onChange: (value: DateRange) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const startInputRef = useRef<HTMLInputElement>(null);
+  const restoreTriggerFocusRef = useRef(false);
+  const dialogId = useId();
+  const titleId = useId();
+  const errorId = useId();
+  const monthRange = getMonthDateRange(currentMonth);
+  const isInCurrentMonth =
+    draft.start >= monthRange.start &&
+    draft.end <= monthRange.end &&
+    draft.start.slice(0, 7) === monthKey(currentMonth) &&
+    draft.end.slice(0, 7) === monthKey(currentMonth);
+  const errorMessage = !isInCurrentMonth
+    ? `日期必须位于 ${getMonthLabel(currentMonth)} 内`
+    : draft.start > draft.end
+      ? "结束日期不能早于开始日期"
+      : "";
+  const isValid = !errorMessage;
+
+  useEffect(() => {
+    if (!isOpen) {
+      setDraft(value);
+    }
+  }, [isOpen, value]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => startInputRef.current?.focus());
+
+    const closeWhenOutside = (event: PointerEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) {
+        restoreTriggerFocusRef.current = false;
+        setIsOpen(false);
+      }
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        restoreTriggerFocusRef.current = true;
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeWhenOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("pointerdown", closeWhenOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+      if (restoreTriggerFocusRef.current) {
+        window.requestAnimationFrame(() => triggerRef.current?.focus());
+      }
+    };
+  }, [isOpen]);
+
+  const openPicker = () => {
+    if (isOpen) {
+      restoreTriggerFocusRef.current = true;
+      setIsOpen(false);
+      return;
+    }
+    restoreTriggerFocusRef.current = false;
+    setDraft(value);
+    setIsOpen(true);
+  };
+
+  return (
+    <div ref={containerRef} className="relative">
+      <p className="text-xl font-semibold tracking-normal text-slate-950">{getMonthLabel(currentMonth)}</p>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={openPicker}
+        className="mt-2 inline-flex items-center gap-2 rounded-md text-sm font-medium text-slate-500 transition hover:text-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-50"
+        aria-label={`修改日期范围，当前：${getDateRangeLabel(value)}`}
+        aria-expanded={isOpen}
+        aria-haspopup="dialog"
+        aria-controls={isOpen ? dialogId : undefined}
+      >
+        <CalendarRange className="size-4" />
+        {getDateRangeLabel(value)}
+        <ChevronDown className={`size-3.5 transition ${isOpen ? "rotate-180" : ""}`} />
+      </button>
+      {isOpen ? (
+        <div
+          id={dialogId}
+          role="dialog"
+          aria-labelledby={titleId}
+          className="menu-pop no-print absolute left-0 top-full z-50 mt-3 max-h-[calc(100vh-7rem)] w-[340px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl border border-slate-200/80 bg-white p-4 shadow-[0_18px_50px_rgba(15,23,42,0.18)] ring-1 ring-slate-950/5"
+        >
+          <div className="flex items-center justify-between">
+            <div>
+              <p id={titleId} className="text-sm font-semibold text-slate-900">精确日期范围</p>
+              <p className="mt-1 text-xs text-slate-500">可选择 {getMonthLabel(currentMonth)} 内任意起止日</p>
+            </div>
+            <CalendarDays className="size-5 text-blue-600" />
+          </div>
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="text-xs font-medium text-slate-600">
+              开始日期
+              <input
+                ref={startInputRef}
+                type="date"
+                value={draft.start}
+                min={monthRange.start}
+                max={monthRange.end}
+                aria-invalid={Boolean(errorMessage)}
+                aria-describedby={errorMessage ? errorId : undefined}
+                onChange={(event) => setDraft((current) => ({ ...current, start: event.target.value }))}
+                className="mt-1.5 h-10 w-full rounded-lg border-0 bg-slate-50 px-2.5 text-sm text-slate-800 outline-none ring-1 ring-slate-200 focus:bg-white focus:ring-2 focus:ring-blue-500"
+              />
+            </label>
+            <label className="text-xs font-medium text-slate-600">
+              结束日期
+              <input
+                type="date"
+                value={draft.end}
+                min={monthRange.start}
+                max={monthRange.end}
+                aria-invalid={Boolean(errorMessage)}
+                aria-describedby={errorMessage ? errorId : undefined}
+                onChange={(event) => setDraft((current) => ({ ...current, end: event.target.value }))}
+                className="mt-1.5 h-10 w-full rounded-lg border-0 bg-slate-50 px-2.5 text-sm text-slate-800 outline-none ring-1 ring-slate-200 focus:bg-white focus:ring-2 focus:ring-blue-500"
+              />
+            </label>
+          </div>
+          {errorMessage ? (
+            <p id={errorId} role="alert" className="mt-2 text-xs font-medium text-rose-600">
+              {errorMessage}
+            </p>
+          ) : null}
+          <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
+            <button
+              type="button"
+              onClick={() => setDraft(monthRange)}
+              className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
+            >
+              恢复整月
+            </button>
+            <div className="flex gap-2">
+              <button
+              type="button"
+              onClick={() => {
+                restoreTriggerFocusRef.current = true;
+                setIsOpen(false);
+              }}
+                className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={!isValid}
+                onClick={() => {
+                  onChange(draft);
+                  restoreTriggerFocusRef.current = true;
+                  setIsOpen(false);
+                }}
+                className="rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+              >
+                应用范围
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function CategorySelect({
   category,
   onChange,
@@ -952,81 +1261,260 @@ function AnalysisProgress({
   );
 }
 
+function useModalFocus(
+  isOpen: boolean,
+  containerRef: { current: HTMLElement | null },
+  initialFocusRef: { current: HTMLElement | null },
+  onClose: () => void,
+  fallbackSelector: string,
+) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const background = document.querySelector<HTMLElement>(".print-shell");
+    const previousOverflow = document.body.style.overflow;
+    const previousInert = background?.inert ?? false;
+    if (background) {
+      background.inert = true;
+    }
+    document.body.style.overflow = "hidden";
+
+    const frame = window.requestAnimationFrame(() => {
+      (initialFocusRef.current ?? containerRef.current)?.focus();
+    });
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !containerRef.current) {
+        return;
+      }
+
+      const focusable = Array.from(
+        containerRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], input:not([disabled]), iframe, [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter(
+        (element) => element.offsetParent !== null && !element.hasAttribute("data-focus-sentinel"),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        containerRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (background) {
+        background.inert = previousInert;
+      }
+      window.requestAnimationFrame(() => {
+        if (returnFocus?.isConnected) {
+          returnFocus.focus();
+        } else {
+          document.querySelector<HTMLElement>(fallbackSelector)?.focus();
+        }
+      });
+    };
+  }, [containerRef, fallbackSelector, initialFocusRef, isOpen]);
+}
+
 function SourceCell({
   expense,
   onPreview,
+  onAddAttachments,
+  isUploading,
+  isUploadDisabled,
 }: {
   expense: Expense;
-  onPreview: (attachment: Attachment) => void;
+  onPreview: (attachment: Attachment, expenseId: string) => void;
+  onAddAttachments: (expenseId: string, files: File[]) => void;
+  isUploading: boolean;
+  isUploadDisabled: boolean;
 }) {
-  if (!expense.attachment) {
-    return (
-      <span className="inline-flex items-center gap-1 text-slate-500">
-        {expense.source === "AI 识别" ? <BrainCircuit className="size-3.5 text-blue-600" /> : null}
-        {expense.source}
-      </span>
-    );
-  }
-
-  const attachment = expense.attachment;
-  const image = isImageAttachment(attachment);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const attachments = getExpenseAttachments(expense);
   return (
-    <button
-      type="button"
-      onClick={() => onPreview(attachment)}
-      className="no-print inline-flex items-center gap-1.5 rounded-md bg-transparent px-1 py-1 text-left text-xs font-medium text-slate-500 transition hover:bg-blue-50/60 hover:text-blue-700"
-      title={attachment.name}
-    >
-      {image ? (
-        <img
-          src={attachmentUrl(attachment)}
-          alt=""
-          className="size-9 rounded-md object-cover"
-        />
+    <div className="no-print flex min-w-0 items-center gap-2">
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        className="hidden"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => {
+          const files = Array.from(event.target.files ?? []);
+          if (files.length > 0) {
+            onAddAttachments(expense.id, files);
+          }
+          event.target.value = "";
+        }}
+      />
+      {attachments.length > 0 ? (
+        <div className="flex max-w-[150px] min-w-0 items-center gap-1 overflow-x-auto py-1">
+          {attachments.map((attachment) => {
+            const image = isImageAttachment(attachment);
+            const previewable = canPreviewAttachment(attachment);
+            const className =
+              "relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border-2 border-white bg-slate-100 text-slate-500 shadow-sm transition hover:z-10 hover:-translate-y-0.5 hover:text-blue-700";
+            const content = image ? (
+              <img src={attachmentUrl(attachment)} alt="" className="size-full object-cover" />
+            ) : isPdfAttachment(attachment) ? (
+              <FileText className="size-4" />
+            ) : (
+              <FileIcon className="size-4" />
+            );
+            return previewable ? (
+              <button
+                key={attachment.id}
+                type="button"
+                onClick={() => onPreview(attachment, expense.id)}
+                className={className}
+                title={attachment.name}
+                aria-label={`预览附件 ${attachment.name}`}
+              >
+                {content}
+              </button>
+            ) : (
+              <a
+                key={attachment.id}
+                href={attachmentDownloadUrl(attachment)}
+                className={className}
+                title={`${attachment.name}（下载）`}
+                aria-label={`下载附件 ${attachment.name}`}
+              >
+                {content}
+              </a>
+            );
+          })}
+        </div>
       ) : (
-        <FileText className="size-3.5" />
+        <span className="inline-flex min-w-0 items-center gap-1 text-xs text-slate-500">
+          {expense.source === "AI 识别" ? <BrainCircuit className="size-3.5 shrink-0 text-blue-600" /> : null}
+          <span className="truncate">{expense.source}</span>
+        </span>
       )}
-      <span>{image ? "上传图片" : "上传 PDF"}</span>
-    </button>
+      <span className="shrink-0 text-[11px] font-medium text-slate-400">
+        {attachments.length > 0 ? `${attachments.length} 个` : ""}
+      </span>
+      <button
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        disabled={isUploadDisabled}
+        className="relative flex size-8 shrink-0 items-center justify-center rounded-lg text-slate-400 ring-1 ring-slate-200 transition hover:bg-blue-50 hover:text-blue-700 hover:ring-blue-200 disabled:cursor-wait disabled:opacity-60"
+        aria-label={isUploading ? `正在为 ${expense.description} 上传附件` : `为 ${expense.description} 添加附件`}
+        aria-busy={isUploading}
+        title="添加附件（格式不限，单个不超过 10MB）"
+      >
+        {isUploading ? (
+          <RefreshCw className="size-3.5 animate-spin" />
+        ) : (
+          <>
+            <Paperclip className="size-4" />
+            <Plus className="absolute bottom-1 right-1 size-2.5 rounded-full bg-white" />
+          </>
+        )}
+      </button>
+    </div>
   );
 }
 
 function AttachmentPreview({
   attachment,
   isReanalyzing,
+  canReanalyze,
   onClose,
   onReanalyze,
 }: {
   attachment: Attachment | null;
   isReanalyzing: boolean;
+  canReanalyze: boolean;
   onClose: () => void;
   onReanalyze: (attachment: Attachment) => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  useModalFocus(Boolean(attachment), dialogRef, closeButtonRef, onClose, "table button");
+
   if (!attachment) {
     return null;
   }
 
   const image = isImageAttachment(attachment);
+  const pdf = isPdfAttachment(attachment);
   const url = attachmentUrl(attachment);
-  return (
-    <div className="no-print fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">
-      <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg bg-white shadow-2xl">
+  return createPortal(
+    <div
+      className="no-print fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-slate-950/70 p-4"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
+      >
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
           <div className="flex min-w-0 items-center gap-2">
-            {image ? <ImageIcon className="size-4 text-blue-600" /> : <FileText className="size-4 text-slate-500" />}
-            <p className="truncate text-sm font-semibold text-slate-800">{attachment.name}</p>
+            {image ? (
+              <ImageIcon className="size-4 text-blue-600" />
+            ) : pdf ? (
+              <FileText className="size-4 text-slate-500" />
+            ) : (
+              <FileIcon className="size-4 text-slate-500" />
+            )}
+            <p id={titleId} className="truncate text-sm font-semibold text-slate-800">{attachment.name}</p>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => onReanalyze(attachment)}
-              disabled={isReanalyzing}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-semibold text-blue-700 ring-1 ring-blue-200 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+            <a
+              href={attachmentDownloadUrl(attachment)}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-semibold text-slate-600 ring-1 ring-slate-200 transition hover:bg-slate-50"
             >
-              <RefreshCw className={`size-3.5 ${isReanalyzing ? "animate-spin" : ""}`} />
-              {isReanalyzing ? "重新识别中" : "重新识别并修复"}
-            </button>
+              <Download className="size-3.5" />
+              下载
+            </a>
+            {canReanalyze ? (
+              <button
+                type="button"
+                onClick={() => onReanalyze(attachment)}
+                disabled={isReanalyzing}
+                className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-semibold text-blue-700 ring-1 ring-blue-200 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <RefreshCw className={`size-3.5 ${isReanalyzing ? "animate-spin" : ""}`} />
+                {isReanalyzing ? "重新识别中" : "重新识别并修复"}
+              </button>
+            ) : null}
             <button
+              ref={closeButtonRef}
               type="button"
               onClick={onClose}
               className="flex size-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
@@ -1036,39 +1524,187 @@ function AttachmentPreview({
             </button>
           </div>
         </div>
-        <div className="flex min-h-96 flex-1 items-center justify-center bg-slate-100 p-4">
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-slate-100 p-4">
           {image ? (
             <img
               src={url}
               alt={attachment.name}
               className="max-h-[78vh] max-w-full rounded-md object-contain shadow-sm"
             />
+          ) : pdf ? (
+            <iframe
+              title={attachment.name}
+              src={url}
+              sandbox=""
+              tabIndex={0}
+              className="h-[78vh] w-full rounded-md bg-white"
+            />
           ) : (
-            <iframe title={attachment.name} src={url} className="h-[78vh] w-full rounded-md bg-white" />
+            <div className="flex min-h-72 flex-col items-center justify-center rounded-xl bg-white px-8 text-center shadow-sm">
+              <FileIcon className="size-12 text-slate-300" />
+              <p className="mt-4 max-w-md truncate text-sm font-semibold text-slate-800">{attachment.name}</p>
+              <p className="mt-2 text-xs text-slate-500">此格式仅支持安全下载，不在页面中执行或预览。</p>
+            </div>
           )}
         </div>
+        <span
+          data-focus-sentinel
+          tabIndex={0}
+          className="sr-only"
+          onFocus={() =>
+            dialogRef.current
+              ?.querySelector<HTMLElement>('a[href], button:not([disabled])')
+              ?.focus()
+          }
+        />
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
-function EmptyState() {
+function SelectionButton({
+  checked,
+  mixed = false,
+  label,
+  onToggle,
+}: {
+  checked: boolean;
+  mixed?: boolean;
+  label: string;
+  onToggle: (shiftKey: boolean) => void;
+}) {
+  const Icon = mixed ? SquareMinus : checked ? SquareCheckBig : Square;
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={mixed ? "mixed" : checked}
+      aria-label={label}
+      onClick={(event) => onToggle(event.shiftKey)}
+      className={`no-print flex size-9 items-center justify-center rounded-lg transition focus:outline-none focus:ring-4 focus:ring-blue-100 ${
+        checked || mixed
+          ? "bg-blue-50 text-blue-700"
+          : "text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+      }`}
+    >
+      <Icon className="size-4" />
+    </button>
+  );
+}
+
+function DeleteExpensesDialog({
+  count,
+  onCancel,
+  onConfirm,
+}: {
+  count: number;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+  useModalFocus(
+    count > 0,
+    dialogRef,
+    cancelButtonRef,
+    onCancel,
+    '[aria-label="全选当前筛选结果"]',
+  );
+
+  if (count === 0) {
+    return null;
+  }
+
+  return createPortal(
+    <div
+      className="no-print fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-[2px]"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onCancel();
+        }
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        tabIndex={-1}
+        className="menu-pop w-full max-w-sm rounded-2xl bg-white p-5 shadow-[0_24px_80px_rgba(15,23,42,0.28)] ring-1 ring-slate-950/10"
+      >
+        <div className="flex size-11 items-center justify-center rounded-xl bg-rose-50 text-rose-600">
+          <AlertTriangle className="size-5" />
+        </div>
+        <h2 id={titleId} className="mt-4 text-base font-semibold text-slate-950">删除 {count} 条消费记录？</h2>
+        <p id={descriptionId} className="mt-2 text-sm leading-6 text-slate-500">
+          删除后记录会从共享账单中移除；公共附件文件不会被级联删除，避免影响其他引用记录。
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            ref={cancelButtonRef}
+            type="button"
+            onClick={onCancel}
+            className="h-9 rounded-lg px-4 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 focus:outline-none focus:ring-4 focus:ring-slate-200"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="inline-flex h-9 items-center gap-2 rounded-lg bg-rose-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-700 focus:outline-none focus:ring-4 focus:ring-rose-200"
+          >
+            <Trash2 className="size-4" />
+            确认删除
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function EmptyState({
+  hasRangeExpenses,
+  onResetRange,
+  onClearFilters,
+}: {
+  hasRangeExpenses: boolean;
+  onResetRange: () => void;
+  onClearFilters: () => void;
+}) {
   return (
     <div className="flex min-h-52 flex-col items-center justify-center bg-white text-center">
       <ReceiptText className="mb-3 size-8 text-slate-400" />
-      <p className="text-sm font-medium text-slate-700">当前月份暂无消费记录</p>
-      <p className="mt-1 text-xs text-slate-500">上传消费截图或 PDF 后会自动生成表格</p>
+      <p className="text-sm font-medium text-slate-700">
+        {hasRangeExpenses ? "没有符合筛选条件的记录" : "所选日期范围暂无消费记录"}
+      </p>
+      <p className="mt-1 text-xs text-slate-500">
+        {hasRangeExpenses ? "可以清除状态或搜索条件后重试" : "可恢复整月范围，或上传新的消费票据"}
+      </p>
+      <button
+        type="button"
+        onClick={hasRangeExpenses ? onClearFilters : onResetRange}
+        className="no-print mt-4 rounded-lg px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-50"
+      >
+        {hasRangeExpenses ? "清除筛选" : "恢复整月"}
+      </button>
     </div>
   );
 }
 
 function ExportPdfReport({
   currentMonth,
+  dateRange,
   filterLabel,
   expenses,
   summary,
 }: {
   currentMonth: Date;
+  dateRange: DateRange;
   filterLabel: string;
   expenses: Expense[];
   summary: ExportSummary;
@@ -1092,9 +1728,9 @@ function ExportPdfReport({
     >
       <div style={{ display: "flex", justifyContent: "space-between", gap: 24 }}>
         <div>
-          <div style={{ fontSize: 24, fontWeight: 700 }}>月度消费明细</div>
+          <div style={{ fontSize: 24, fontWeight: 700 }}>消费明细</div>
           <div style={{ marginTop: 8, color: "#64748b", fontSize: 14 }}>
-            {getMonthLabel(currentMonth)} · {getDateRangeLabel(currentMonth)} · 当前筛选：{filterLabel}
+            {getMonthLabel(currentMonth)} · {getDateRangeLabel(dateRange)} · 当前筛选：{filterLabel}
           </div>
         </div>
         <div style={{ color: "#64748b", fontSize: 13, textAlign: "right" }}>
@@ -1122,7 +1758,7 @@ function ExportPdfReport({
       <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 24, fontSize: 12 }}>
         <thead>
           <tr style={{ background: "#f8fafc", color: "#475569", textAlign: "left" }}>
-            {["日期", "描述", "类型", "金额", "商家", "报销状态", "来源", "备注"].map((head) => (
+            {["日期", "描述", "类型", "金额", "商家", "报销状态", "来源 / 附件", "备注"].map((head) => (
               <th key={head} style={{ ...cellStyle, fontWeight: 700 }}>
                 {head}
               </th>
@@ -1145,7 +1781,13 @@ function ExportPdfReport({
               </td>
               <td style={cellStyle}>{expense.merchant}</td>
               <td style={cellStyle}>{expense.status === "reported" ? "已报销" : "未报销"}</td>
-              <td style={cellStyle}>{expense.attachment?.name ?? expense.source}</td>
+              <td style={cellStyle}>
+                {getExpenseAttachments(expense).length > 0
+                  ? getExpenseAttachments(expense)
+                      .map((attachment) => attachment.name)
+                      .join("、")
+                  : expense.source}
+              </td>
               <td style={cellStyle}>{expense.note}</td>
             </tr>
           ))}
@@ -1160,6 +1802,7 @@ function App() {
   const [isLoadingBill, setIsLoadingBill] = useState(true);
   const [saveStatus, setSaveStatus] = useState("正在连接账单");
   const [currentMonth, setCurrentMonth] = useState(currentMonthDate);
+  const [dateRange, setDateRange] = useState<DateRange>(() => getMonthDateRange(currentMonthDate()));
   const [expenses, setExpenses] = useState<Expense[]>(seedExpenses);
   const [statusFilter, setStatusFilter] = useState<"all" | Status>("all");
   const [query, setQuery] = useState("");
@@ -1169,12 +1812,44 @@ function App() {
   const [isUploadDragging, setIsUploadDragging] = useState(false);
   const [lastUpload, setLastUpload] = useState<UploadRecord | null>(null);
   const [exportNotice, setExportNotice] = useState("");
-  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
+  const [previewTarget, setPreviewTarget] = useState<AttachmentPreviewTarget | null>(null);
   const [repairingAttachmentId, setRepairingAttachmentId] = useState("");
+  const [uploadingAttachmentExpenseId, setUploadingAttachmentExpenseId] = useState("");
+  const [selectedExpenseIds, setSelectedExpenseIds] = useState<Set<string>>(() => new Set());
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadAreaRef = useRef<HTMLDivElement>(null);
   const pdfReportRef = useRef<HTMLDivElement>(null);
   const loadedBillRef = useRef(false);
+  const selectionAnchorIdRef = useRef<string | null>(null);
+  const activeBillIdRef = useRef("");
+  const pendingBillSaveRef = useRef<Bill | null>(null);
+  const billSaveInFlightRef = useRef(false);
+  const previewAttachment = previewTarget?.attachment ?? null;
+  activeBillIdRef.current = billId;
+
+  const flushPendingBillSave = async () => {
+    if (billSaveInFlightRef.current) {
+      return;
+    }
+
+    billSaveInFlightRef.current = true;
+    while (pendingBillSaveRef.current) {
+      const snapshot = pendingBillSaveRef.current;
+      pendingBillSaveRef.current = null;
+      try {
+        await saveBill(snapshot);
+        if (activeBillIdRef.current === snapshot.id && !pendingBillSaveRef.current) {
+          setSaveStatus("已保存");
+        }
+      } catch (error) {
+        if (activeBillIdRef.current === snapshot.id && !pendingBillSaveRef.current) {
+          setSaveStatus(error instanceof Error ? error.message : "保存失败");
+        }
+      }
+    }
+    billSaveInFlightRef.current = false;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -1191,8 +1866,12 @@ function App() {
           return;
         }
 
-        setCurrentMonth(parseMonthDate(bill.currentMonth));
+        const loadedMonth = parseMonthDate(bill.currentMonth);
+        setCurrentMonth(loadedMonth);
+        setDateRange(normalizeDateRange(bill.dateRange, loadedMonth));
         setExpenses(bill.expenses);
+        setSelectedExpenseIds(new Set());
+        selectionAnchorIdRef.current = null;
         setSaveStatus("已连接共享账单");
         loadedBillRef.current = true;
       } catch (error) {
@@ -1228,17 +1907,17 @@ function App() {
 
     setSaveStatus("正在保存");
     const timeout = window.setTimeout(() => {
-      saveBill({
+      pendingBillSaveRef.current = {
         id: billId,
         currentMonth: monthKey(currentMonth),
+        dateRange,
         expenses,
-      })
-        .then(() => setSaveStatus("已保存"))
-        .catch((error) => setSaveStatus(error instanceof Error ? error.message : "保存失败"));
+      };
+      void flushPendingBillSave();
     }, 450);
 
     return () => window.clearTimeout(timeout);
-  }, [billId, currentMonth, expenses, isLoadingBill]);
+  }, [billId, currentMonth, dateRange, expenses, isLoadingBill]);
 
   const currentKey = monthKey(currentMonth);
   const monthExpenses = useMemo(
@@ -1249,20 +1928,35 @@ function App() {
     [expenses, currentKey],
   );
 
+  const rangeExpenses = useMemo(
+    () =>
+      monthExpenses.filter(
+        (expense) => expense.date >= dateRange.start && expense.date <= dateRange.end,
+      ),
+    [dateRange.end, dateRange.start, monthExpenses],
+  );
+
   const filteredExpenses = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    return monthExpenses.filter((expense) => {
+    return rangeExpenses.filter((expense) => {
       const matchesStatus = statusFilter === "all" || expense.status === statusFilter;
       const matchesQuery =
         normalized.length === 0 ||
-        [expense.description, expense.merchant, expense.note, expense.category, expense.source, expense.attachment?.name]
+        [
+          expense.description,
+          expense.merchant,
+          expense.note,
+          expense.category,
+          expense.source,
+          ...getExpenseAttachments(expense).map((attachment) => attachment.name),
+        ]
           .join(" ")
           .toLowerCase()
           .includes(normalized);
 
       return matchesStatus && matchesQuery;
     });
-  }, [monthExpenses, query, statusFilter]);
+  }, [query, rangeExpenses, statusFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredExpenses.length / pageSize));
   const visiblePageNumbers = useMemo(
@@ -1273,33 +1967,54 @@ function App() {
     const start = (currentPage - 1) * pageSize;
     return filteredExpenses.slice(start, start + pageSize);
   }, [currentPage, filteredExpenses]);
+  const allFilteredSelected =
+    filteredExpenses.length > 0 &&
+    filteredExpenses.every((expense) => selectedExpenseIds.has(expense.id));
+  const someFilteredSelected =
+    !allFilteredSelected && filteredExpenses.some((expense) => selectedExpenseIds.has(expense.id));
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [currentKey, query, statusFilter]);
+  }, [currentKey, dateRange.end, dateRange.start, query, statusFilter]);
+
+  useEffect(() => {
+    setSelectedExpenseIds(new Set());
+    selectionAnchorIdRef.current = null;
+  }, [billId, currentKey, dateRange.end, dateRange.start, query, statusFilter]);
+
+  useEffect(() => {
+    const visibleIds = new Set(filteredExpenses.map((expense) => expense.id));
+    setSelectedExpenseIds((previous) => {
+      const next = new Set([...previous].filter((id) => visibleIds.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+    if (selectionAnchorIdRef.current && !visibleIds.has(selectionAnchorIdRef.current)) {
+      selectionAnchorIdRef.current = null;
+    }
+  }, [filteredExpenses]);
 
   useEffect(() => {
     setCurrentPage((page) => Math.min(page, totalPages));
   }, [totalPages]);
 
   const summary = useMemo(() => {
-    const total = monthExpenses.reduce((sum, expense) => sum + amountInCny(expense), 0);
-    const reported = monthExpenses
+    const total = rangeExpenses.reduce((sum, expense) => sum + amountInCny(expense), 0);
+    const reported = rangeExpenses
       .filter((expense) => expense.status === "reported")
       .reduce((sum, expense) => sum + amountInCny(expense), 0);
     const unreported = total - reported;
-    const categories = new Set(monthExpenses.map((expense) => expense.category)).size;
+    const categories = new Set(rangeExpenses.map((expense) => expense.category)).size;
 
     return {
       total,
       reported,
       unreported,
-      count: monthExpenses.length,
+      count: rangeExpenses.length,
       categories,
       reportedRatio: total ? (reported / total) * 100 : 0,
       unreportedRatio: total ? (unreported / total) * 100 : 0,
     };
-  }, [monthExpenses]);
+  }, [rangeExpenses]);
 
   const filterLabel = useMemo(() => getFilterLabel(statusFilter, query), [query, statusFilter]);
 
@@ -1347,8 +2062,11 @@ function App() {
         throw new Error("共享账单还未加载完成");
       }
 
-      const result = await analyzeUploadedFiles(files, currentMonth, billId);
+      const result = await analyzeUploadedFiles(files, currentMonth, dateRange, billId);
       const generated = result.expenses;
+      const outsideRangeCount = generated.filter(
+        (expense) => expense.date < dateRange.start || expense.date > dateRange.end,
+      ).length;
       setExpenses((previous) => [...generated, ...previous]);
       setLastUpload({
         name: files.length === 1 ? files[0].name : `${files.length} 个文件`,
@@ -1358,9 +2076,13 @@ function App() {
         ),
       });
       setExportNotice(
-        result.warnings.length > 0
-          ? `模型识别完成（${result.modelName}），部分文件提示：${result.warnings.join("；")}`
-          : `模型识别完成（${result.modelName}）`,
+        [
+          `模型识别完成（${result.modelName}）`,
+          result.warnings.length > 0 ? `部分文件提示：${result.warnings.join("；")}` : "",
+          outsideRangeCount > 0 ? `${outsideRangeCount} 条真实日期不在当前筛选范围内` : "",
+        ]
+          .filter(Boolean)
+          .join("；"),
       );
     } catch (error) {
       setExportNotice(error instanceof Error ? `模型识别失败：${error.message}` : "模型识别失败");
@@ -1433,7 +2155,52 @@ function App() {
     void processFiles(files);
   };
 
-  const handleReanalyzeAttachment = async (attachment: Attachment) => {
+  const handleAddAttachments = async (expenseId: string, files: File[]) => {
+    if (!billId || files.length === 0 || uploadingAttachmentExpenseId) {
+      return;
+    }
+    if (files.length > 8) {
+      setExportNotice("附件上传失败：每次最多选择 8 个文件");
+      return;
+    }
+    if (files.some((file) => file.size > 10 * 1024 * 1024)) {
+      setExportNotice("附件上传失败：单个文件不能超过 10MB");
+      return;
+    }
+
+    setUploadingAttachmentExpenseId(expenseId);
+    setExportNotice(`正在上传 ${files.length} 个附件...`);
+    try {
+      const attachments = await uploadExpenseAttachments(files, billId);
+      if (attachments.length === 0) {
+        throw new Error("服务器未返回有效附件");
+      }
+      setExpenses((previous) =>
+        previous.map((expense) => {
+          if (expense.id !== expenseId) {
+            return expense;
+          }
+          const unique = new Map(
+            [...(expense.attachments ?? []), ...attachments].map((attachment) => [
+              attachment.id,
+              attachment,
+            ]),
+          );
+          if (expense.attachment) {
+            unique.delete(expense.attachment.id);
+          }
+          return { ...expense, attachments: [...unique.values()] };
+        }),
+      );
+      setExportNotice(`已为该记录添加 ${attachments.length} 个附件`);
+    } catch (error) {
+      setExportNotice(error instanceof Error ? `附件上传失败：${error.message}` : "附件上传失败");
+    } finally {
+      setUploadingAttachmentExpenseId("");
+    }
+  };
+
+  const handleReanalyzeAttachment = async (attachment: Attachment, expenseId: string) => {
     if (!billId || isAnalyzing || repairingAttachmentId) {
       return;
     }
@@ -1441,27 +2208,32 @@ function App() {
     setRepairingAttachmentId(attachment.id);
     setExportNotice("正在用当前主模型重新识别原附件...");
     try {
-      const result = await reanalyzeStoredAttachment(attachment, currentMonth, billId);
+      const result = await reanalyzeStoredAttachment(attachment, currentMonth, dateRange, billId);
       setExpenses((previous) => {
-        const replaced = previous.filter((expense) => expense.attachment?.id === attachment.id);
+        const targetIndex = previous.findIndex((expense) => expense.id === expenseId);
+        if (targetIndex < 0) {
+          return previous;
+        }
+        const existing = previous[targetIndex];
         const repaired = result.expenses.map((expense, index) => {
-          const existing = replaced[index];
-          return existing
+          return index === 0
             ? {
                 ...expense,
                 id: existing.id,
                 status: existing.status,
                 note: existing.note || expense.note,
                 recurring: existing.recurring,
+                attachments: existing.attachments,
               }
-            : expense;
+            : { ...expense, attachments: existing.attachments };
         });
         return [
+          ...previous.slice(0, targetIndex),
           ...repaired,
-          ...previous.filter((expense) => expense.attachment?.id !== attachment.id),
+          ...previous.slice(targetIndex + 1),
         ];
       });
-      setPreviewAttachment(null);
+      setPreviewTarget(null);
       setExportNotice(
         result.warnings.length > 0
           ? `已用 ${result.modelName} 修复记录；提示：${result.warnings.join("；")}`
@@ -1543,7 +2315,7 @@ function App() {
         pageIndex += 1;
       }
 
-      const filename = `月度消费-${currentKey}-${sanitizeFilenamePart(filterLabel)}-${getDownloadStamp()}.pdf`;
+      const filename = `消费明细-${dateRange.start}_至_${dateRange.end}-${sanitizeFilenamePart(filterLabel)}-${getDownloadStamp()}.pdf`;
       pdf.save(filename);
       setExportNotice(`已下载 ${filename}`);
     } catch (error) {
@@ -1561,6 +2333,81 @@ function App() {
     setExpenses((previous) =>
       previous.map((expense) => (expense.id === id ? { ...expense, ...changes } : expense)),
     );
+  };
+
+  const showMonth = (target: Date) => {
+    const normalized = new Date(target.getFullYear(), target.getMonth(), 1);
+    setCurrentMonth(normalized);
+    setDateRange(getMonthDateRange(normalized));
+  };
+
+  const showToday = () => {
+    const now = new Date();
+    const month = new Date(now.getFullYear(), now.getMonth(), 1);
+    const today = `${monthKey(month)}-${String(now.getDate()).padStart(2, "0")}`;
+    setCurrentMonth(month);
+    setDateRange({ start: today, end: today });
+  };
+
+  const toggleExpenseSelection = (expenseId: string, shiftKey: boolean) => {
+    setSelectedExpenseIds((previous) => {
+      const next = new Set(previous);
+      const anchorId = selectionAnchorIdRef.current;
+      const orderedIds = filteredExpenses.map((expense) => expense.id);
+      const anchorIndex = anchorId ? orderedIds.indexOf(anchorId) : -1;
+      const targetIndex = orderedIds.indexOf(expenseId);
+
+      if (shiftKey && anchorIndex >= 0 && targetIndex >= 0) {
+        const shouldSelect = !previous.has(expenseId);
+        const start = Math.min(anchorIndex, targetIndex);
+        const end = Math.max(anchorIndex, targetIndex);
+        for (const id of orderedIds.slice(start, end + 1)) {
+          if (shouldSelect) {
+            next.add(id);
+          } else {
+            next.delete(id);
+          }
+        }
+      } else {
+        if (next.has(expenseId)) {
+          next.delete(expenseId);
+        } else {
+          next.add(expenseId);
+        }
+        selectionAnchorIdRef.current = expenseId;
+      }
+      return next;
+    });
+  };
+
+  const toggleAllFilteredExpenses = () => {
+    setSelectedExpenseIds((previous) => {
+      const next = new Set(previous);
+      if (allFilteredSelected) {
+        for (const expense of filteredExpenses) {
+          next.delete(expense.id);
+        }
+      } else {
+        for (const expense of filteredExpenses) {
+          next.add(expense.id);
+        }
+      }
+      return next;
+    });
+    selectionAnchorIdRef.current = null;
+  };
+
+  const clearExpenseSelection = () => {
+    setSelectedExpenseIds(new Set());
+    selectionAnchorIdRef.current = null;
+  };
+
+  const confirmDeleteExpenses = () => {
+    const ids = new Set(pendingDeleteIds);
+    setExpenses((previous) => previous.filter((expense) => !ids.has(expense.id)));
+    setExportNotice(`已删除 ${ids.size} 条消费记录`);
+    setPendingDeleteIds([]);
+    clearExpenseSelection();
   };
 
   const rollToNextMonth = () => {
@@ -1586,7 +2433,7 @@ function App() {
     if (movedItems.length > 0) {
       setExpenses((previous) => [...movedItems, ...previous]);
     }
-    setCurrentMonth(target);
+    showMonth(target);
   };
 
   const copyShareLink = async () => {
@@ -1655,21 +2502,15 @@ function App() {
 
         <div className="px-6 py-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <button
-                type="button"
-                className="inline-flex items-center gap-2 rounded-md text-xl font-semibold tracking-normal text-slate-950"
-                aria-label="选择月份"
-              >
-                {getMonthLabel(currentMonth)}
-                <ChevronDown className="mt-1 size-5 text-slate-500" />
-              </button>
-              <p className="mt-2 text-sm font-medium text-slate-500">{getDateRangeLabel(currentMonth)}</p>
-            </div>
+            <DateRangePicker
+              currentMonth={currentMonth}
+              value={dateRange}
+              onChange={(value) => setDateRange(normalizeDateRange(value, currentMonth))}
+            />
             <div className="no-print flex flex-wrap items-center gap-3">
               <button
                 type="button"
-                onClick={() => setCurrentMonth(addMonths(currentMonth, -1))}
+                onClick={() => showMonth(addMonths(currentMonth, -1))}
                 className="inline-flex h-10 items-center gap-2 rounded-md bg-white px-4 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"
               >
                 <ArrowLeft className="size-4" />
@@ -1677,7 +2518,7 @@ function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setCurrentMonth(addMonths(currentMonth, 1))}
+                onClick={() => showMonth(addMonths(currentMonth, 1))}
                 className="inline-flex h-10 items-center gap-2 rounded-md bg-white px-4 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"
               >
                 下个月
@@ -1685,7 +2526,7 @@ function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setCurrentMonth(new Date(new Date().getFullYear(), new Date().getMonth(), 1))}
+                onClick={showToday}
                 className="inline-flex h-10 items-center rounded-md bg-white px-4 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"
               >
                 今天
@@ -1695,7 +2536,7 @@ function App() {
 
           <section className="print-break-avoid mt-6 grid overflow-hidden rounded-lg bg-white ring-1 ring-slate-100 md:grid-cols-4 md:divide-x md:divide-slate-100">
             <div className="p-5">
-              <p className="text-sm font-semibold text-slate-700">当月总金额（人民币）</p>
+              <p className="text-sm font-semibold text-slate-700">区间总金额（人民币）</p>
               <p className="mt-4 text-3xl font-semibold tracking-normal text-slate-950">{formatCny(summary.total)}</p>
               <p className="mt-3 flex items-center gap-2 text-sm text-slate-500">
                 <span>≈ {formatUsd(summary.total / exchangeRate)}</span>
@@ -1822,7 +2663,7 @@ function App() {
                 >
                   <FileText className="size-4" />
                   全部
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{monthExpenses.length}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{rangeExpenses.length}</span>
                 </button>
                 <button
                   type="button"
@@ -1836,7 +2677,7 @@ function App() {
                   <BadgeCheck className="size-4" />
                   已报销
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
-                    {monthExpenses.filter((expense) => expense.status === "reported").length}
+                    {rangeExpenses.filter((expense) => expense.status === "reported").length}
                   </span>
                 </button>
                 <button
@@ -1851,7 +2692,7 @@ function App() {
                   <Building2 className="size-4" />
                   未报销
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
-                    {monthExpenses.filter((expense) => expense.status === "unreported").length}
+                    {rangeExpenses.filter((expense) => expense.status === "unreported").length}
                   </span>
                 </button>
               </div>
@@ -1880,13 +2721,58 @@ function App() {
               </div>
             </div>
 
-            <div className="overflow-hidden rounded-lg bg-white ring-1 ring-slate-100">
+            {selectedExpenseIds.size > 0 ? (
+              <div className="no-print mt-3 flex flex-col gap-3 rounded-xl border border-blue-100 bg-blue-50/70 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div role="status" aria-live="polite" className="flex items-center gap-3 text-sm font-semibold text-blue-900">
+                  <SquareCheckBig className="size-4 text-blue-600" />
+                  已选择 {selectedExpenseIds.size} 条
+                  <span className="hidden text-xs font-medium text-blue-500 sm:inline">Shift 点击可连续选择</span>
+                  {selectedExpenseIds.size < filteredExpenses.length ? (
+                    <button
+                      type="button"
+                      onClick={toggleAllFilteredExpenses}
+                      className="text-xs font-semibold text-blue-700 underline-offset-4 hover:underline"
+                    >
+                      选择当前筛选的全部 {filteredExpenses.length} 条
+                    </button>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={clearExpenseSelection}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold text-slate-600 transition hover:bg-white"
+                  >
+                    <X className="size-3.5" />
+                    取消选择
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingDeleteIds([...selectedExpenseIds])}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-rose-600 px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-rose-700"
+                  >
+                    <Trash2 className="size-3.5" />
+                    删除 {selectedExpenseIds.size} 条
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="mt-3 overflow-hidden rounded-lg bg-white ring-1 ring-slate-100">
               {filteredExpenses.length === 0 ? (
-                <EmptyState />
+                <EmptyState
+                  hasRangeExpenses={rangeExpenses.length > 0}
+                  onResetRange={() => setDateRange(getMonthDateRange(currentMonth))}
+                  onClearFilters={() => {
+                    setStatusFilter("all");
+                    setQuery("");
+                  }}
+                />
               ) : (
                 <div className="overflow-x-auto overscroll-x-contain">
-                  <table className="w-full min-w-[1460px] table-fixed border-collapse text-left text-sm">
+                  <table className="w-full min-w-[1512px] table-fixed border-collapse text-left text-sm">
                     <colgroup>
+                      <col className="w-[52px]" />
                       <col className="w-[130px]" />
                       <col className="w-[250px]" />
                       <col className="w-[140px]" />
@@ -1898,19 +2784,41 @@ function App() {
                     </colgroup>
                     <thead className="bg-slate-50/90 text-xs font-semibold uppercase tracking-normal text-slate-500">
                       <tr>
+                        <th className="px-2 py-2.5">
+                          <SelectionButton
+                            checked={allFilteredSelected}
+                            mixed={someFilteredSelected}
+                            label="全选当前筛选结果"
+                            onToggle={toggleAllFilteredExpenses}
+                          />
+                        </th>
                         <th className="whitespace-nowrap px-4 py-3">日期</th>
                         <th className="whitespace-nowrap px-4 py-3">描述</th>
                         <th className="whitespace-nowrap px-4 py-3">类型</th>
                         <th className="whitespace-nowrap px-4 py-3 text-right">金额</th>
                         <th className="whitespace-nowrap px-4 py-3">商家</th>
                         <th className="whitespace-nowrap px-4 py-3">报销状态</th>
-                        <th className="whitespace-nowrap px-4 py-3">来源</th>
+                        <th className="whitespace-nowrap px-4 py-3">来源 / 附件</th>
                         <th className="whitespace-nowrap px-4 py-3">备注</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
                       {pagedExpenses.map((expense) => (
-                        <tr key={expense.id} className="transition hover:bg-slate-50/70">
+                        <tr
+                          key={expense.id}
+                          className={`transition ${
+                            selectedExpenseIds.has(expense.id)
+                              ? "bg-blue-50/70 hover:bg-blue-50"
+                              : "hover:bg-slate-50/70"
+                          }`}
+                        >
+                          <td className="px-2 py-2.5">
+                            <SelectionButton
+                              checked={selectedExpenseIds.has(expense.id)}
+                              label={`选择 ${expense.date.replaceAll("-", "/")} ${expense.merchant} ${expense.description}`}
+                              onToggle={(shiftKey) => toggleExpenseSelection(expense.id, shiftKey)}
+                            />
+                          </td>
                           <td className="whitespace-nowrap px-4 py-3 font-medium text-slate-600">{expense.date.replaceAll("-", "/")}</td>
                           <td className="px-4 py-3 font-medium text-slate-800">
                             <div className="flex min-w-0 items-center gap-2">
@@ -1944,7 +2852,17 @@ function App() {
                             />
                           </td>
                           <td className="px-4 py-3">
-                            <SourceCell expense={expense} onPreview={setPreviewAttachment} />
+                            <SourceCell
+                              expense={expense}
+                              onPreview={(attachment, expenseId) =>
+                                setPreviewTarget({ attachment, expenseId })
+                              }
+                              onAddAttachments={(expenseId, files) =>
+                                void handleAddAttachments(expenseId, files)
+                              }
+                              isUploading={uploadingAttachmentExpenseId === expense.id}
+                              isUploadDisabled={Boolean(uploadingAttachmentExpenseId)}
+                            />
                           </td>
                           <td className="px-4 py-3 text-slate-500">
                             <span className="block truncate">{expense.note}</span>
@@ -2013,6 +2931,10 @@ function App() {
                   <span className="mt-2 size-1.5 rounded-full bg-slate-400" />
                   月度固定消费结转时保留原日号
                 </li>
+                <li className="flex gap-2">
+                  <span className="mt-2 size-1.5 rounded-full bg-blue-500" />
+                  结转按当前整月计算，不受上方日期范围筛选影响
+                </li>
               </ul>
             </div>
             <div className="flex flex-col gap-4 border-t border-slate-100 bg-white p-5 sm:flex-row sm:items-center sm:justify-between lg:border-l lg:border-t-0">
@@ -2043,7 +2965,14 @@ function App() {
             </div>
           </section>
 
-          {exportNotice ? <p className="no-print mt-4 text-right text-sm font-medium text-slate-500">{exportNotice}</p> : null}
+          <p
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            className="no-print mt-4 min-h-5 text-right text-sm font-medium text-slate-500"
+          >
+            {exportNotice}
+          </p>
         </div>
       </section>
       <div
@@ -2062,6 +2991,7 @@ function App() {
       >
         <ExportPdfReport
           currentMonth={currentMonth}
+          dateRange={dateRange}
           expenses={filteredExpenses}
           filterLabel={filterLabel}
           summary={filteredSummary}
@@ -2072,8 +3002,26 @@ function App() {
         isReanalyzing={Boolean(
           previewAttachment && repairingAttachmentId === previewAttachment.id,
         )}
-        onClose={() => setPreviewAttachment(null)}
-        onReanalyze={(attachment) => void handleReanalyzeAttachment(attachment)}
+        canReanalyze={Boolean(
+          previewAttachment &&
+            canPreviewAttachment(previewAttachment) &&
+            expenses.some(
+              (expense) =>
+                expense.id === previewTarget?.expenseId &&
+                expense.attachment?.id === previewAttachment.id,
+            ),
+        )}
+        onClose={() => setPreviewTarget(null)}
+        onReanalyze={(attachment) => {
+          if (previewTarget) {
+            void handleReanalyzeAttachment(attachment, previewTarget.expenseId);
+          }
+        }}
+      />
+      <DeleteExpensesDialog
+        count={pendingDeleteIds.length}
+        onCancel={() => setPendingDeleteIds([])}
+        onConfirm={confirmDeleteExpenses}
       />
     </main>
   );
