@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   inferCurrencyFromExpense,
   isLikelyFalsePositiveExpense,
+  normalizeCurrency,
   resolveOriginalAmount,
 } from "./expense-normalizer.mjs";
 
@@ -54,6 +55,88 @@ test("keeps explicit TWD evidence as TWD", () => {
 
   assert.equal(resolveOriginalAmount(expense), 3300);
   assert.equal(inferCurrencyFromExpense(expense), "TWD");
+});
+
+test("recognizes explicit AUD before generic dollar evidence", () => {
+  const cases = [
+    {
+      amountText: "A$185.29",
+      currencyEvidence: "A$ / AUD",
+      evidenceText: "ChatGPT Subscription Total A$185.29 AUD",
+      expectedAmount: 185.29,
+    },
+    {
+      amountText: "AU$152.84",
+      currencyEvidence: "AU$",
+      evidenceText: "ChatGPT Subscription Total AU$152.84",
+      expectedAmount: 152.84,
+    },
+  ];
+
+  for (const item of cases) {
+    const expense = {
+      ...item,
+      currency: "USD",
+      description: "ChatGPT 订阅",
+      merchant: "ChatGPT",
+      source: "上传图片",
+    };
+
+    assert.equal(resolveOriginalAmount(expense), item.expectedAmount);
+    assert.equal(inferCurrencyFromExpense(expense), "AUD");
+  }
+
+  assert.equal(normalizeCurrency("AUD"), "AUD");
+  assert.equal(inferCurrencyFromExpense({ currency: "AUD" }), "AUD");
+});
+
+test("prefers the final paid amount over item total and discount", () => {
+  const expense = {
+    amountText: "优惠金额 ¥4.00",
+    originalAmount: 4,
+    currency: "CNY",
+    description: "绿林细嘴热熔胶枪成人手工",
+    merchant: "绿林官方旗舰店",
+    source: "上传图片",
+    evidenceText: "商品总额 ¥29.90；优惠金额 ¥4.00；实付款 ¥25.90",
+  };
+
+  assert.equal(resolveOriginalAmount(expense), 25.9);
+  assert.equal(isLikelyFalsePositiveExpense({ ...expense, originalAmount: 25.9 }), false);
+});
+
+test("treats 共减 as a discount and keeps the following paid amount", () => {
+  const cases = [
+    ["合计 共减¥2.4 ¥16.45", 16.45],
+    ["实付款 共减¥0.8 ¥8.1", 8.1],
+    ["实付款 共减¥4 ¥17.9", 17.9],
+  ];
+
+  for (const [evidenceText, expected] of cases) {
+    assert.equal(
+      resolveOriginalAmount({
+        originalAmount: Number(evidenceText.match(/共减¥([\d.]+)/)?.[1]),
+        currency: "CNY",
+        source: "上传图片",
+        evidenceText,
+      }),
+      expected,
+    );
+  }
+});
+
+test("rejects a discount-only amount as an expense", () => {
+  const expense = {
+    amountText: "优惠金额 ¥4.00",
+    originalAmount: 4,
+    currency: "CNY",
+    description: "订单优惠",
+    merchant: "绿林官方旗舰店",
+    source: "上传图片",
+    evidenceText: "优惠金额 ¥4.00",
+  };
+
+  assert.equal(isLikelyFalsePositiveExpense(expense), true);
 });
 
 test("rejects order numbers without visible amount evidence", () => {

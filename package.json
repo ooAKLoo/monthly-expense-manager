@@ -10,7 +10,8 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test:unit": "node --test server/*.test.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "repair:data": "node scripts/repair-expense-data.mjs"
   },
   "dependencies": {
     "ali-oss": "^6.23.0",

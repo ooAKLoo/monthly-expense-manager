@@ -19,6 +19,7 @@ jobs:
     env:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      ARK_API_KEY: ${{ secrets.ARK_API_KEY }}
       RELEASE_ARCHIVE: monthly-expense-manager-release.tar.gz
     steps:
       - name: Checkout
@@ -69,7 +70,7 @@ jobs:
           REMOTE_ARCHIVE="/tmp/monthly-expense-manager-${GITHUB_SHA}.tar.gz"
 
           ssh -i ~/.ssh/monthly_expense_deploy "$DEPLOY_USER@$DEPLOY_HOST" \
-            "RELEASE_ID='$RELEASE_ID' REMOTE_ARCHIVE='$REMOTE_ARCHIVE' bash -se" <<'REMOTE_SCRIPT'
+            "RELEASE_ID='$RELEASE_ID' REMOTE_ARCHIVE='$REMOTE_ARCHIVE' ARK_API_KEY='$ARK_API_KEY' bash -se" <<'REMOTE_SCRIPT'
           set -euo pipefail
 
           APP_DIR="/opt/monthly-expense-manager"
@@ -87,6 +88,16 @@ jobs:
           else
             echo "Missing $APP_DIR/current/.env.local; refusing to deploy without production env."
             exit 1
+          fi
+
+          if [ -n "${ARK_API_KEY:-}" ]; then
+            sed -i '/^ARK_API_KEY=/d; /^ARK_API_BASE_URL=/d; /^ARK_RECEIPT_MODEL=/d; /^RECEIPT_AI_PROVIDER=/d' "$RELEASE_DIR/.env.local"
+            {
+              printf '\nARK_API_KEY=%s\n' "$ARK_API_KEY"
+              printf 'ARK_API_BASE_URL=https://ark.cn-beijing.volces.com/api/v3\n'
+              printf 'ARK_RECEIPT_MODEL=doubao-seed-2-0-lite-260428\n'
+              printf 'RECEIPT_AI_PROVIDER=seed\n'
+            } >> "$RELEASE_DIR/.env.local"
           fi
 
           cd "$RELEASE_DIR"

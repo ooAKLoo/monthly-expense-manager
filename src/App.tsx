@@ -6,10 +6,13 @@ import {
   KeyboardEvent,
   SVGProps,
   useEffect,
+  useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowDownUp,
   ArrowLeft,
@@ -43,7 +46,7 @@ import {
   X,
 } from "lucide-react";
 
-type Currency = "CNY" | "USD" | "TWD";
+type Currency = "CNY" | "USD" | "AUD" | "TWD";
 type Status = "reported" | "unreported";
 type Category = "交通" | "餐饮" | "购物" | "住房" | "办公" | "差旅" | "订阅";
 
@@ -61,6 +64,9 @@ type Expense = {
   recurring?: boolean;
   confidence?: number;
   attachment?: Attachment | null;
+  amountText?: string;
+  currencyEvidence?: string;
+  paymentMethod?: string;
   evidenceText?: string;
 };
 
@@ -77,6 +83,10 @@ type AnalyzeExpensesResponse = {
     llm?: string;
     vision?: string;
     multimodal?: string;
+    seed?: string;
+    active?: string;
+    activeProvider?: "seed" | "qwen";
+    usedProviders?: Array<"seed" | "qwen">;
   };
 };
 
@@ -102,6 +112,7 @@ type ExportSummary = {
 };
 
 const exchangeRate = 7.21;
+const audExchangeRate = 4.7;
 const twdExchangeRate = 0.23;
 const pageSize = 8;
 
@@ -135,6 +146,9 @@ function amountInCny(expense: Pick<Expense, "currency" | "originalAmount">) {
   if (expense.currency === "USD") {
     return Number((expense.originalAmount * exchangeRate).toFixed(2));
   }
+  if (expense.currency === "AUD") {
+    return Number((expense.originalAmount * audExchangeRate).toFixed(2));
+  }
   if (expense.currency === "TWD") {
     return Number((expense.originalAmount * twdExchangeRate).toFixed(2));
   }
@@ -165,9 +179,20 @@ function formatTwd(value: number) {
   }).format(value);
 }
 
+function formatAud(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "AUD",
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
 function formatOriginalAmount(expense: Pick<Expense, "currency" | "originalAmount">) {
   if (expense.currency === "USD") {
     return formatUsd(expense.originalAmount);
+  }
+  if (expense.currency === "AUD") {
+    return formatAud(expense.originalAmount);
   }
   if (expense.currency === "TWD") {
     return formatTwd(expense.originalAmount);
@@ -382,6 +407,8 @@ async function analyzeUploadedFiles(files: File[], currentMonth: Date, billId: s
   files.forEach((file) => formData.append("files", file));
   formData.append("month", monthKey(currentMonth));
   formData.append("exchangeRate", String(exchangeRate));
+  formData.append("audExchangeRate", String(audExchangeRate));
+  formData.append("twdExchangeRate", String(twdExchangeRate));
 
   const response = await fetch(apiUrl(`bills/${billId}/analyze-expenses`), {
     method: "POST",
@@ -403,7 +430,53 @@ async function analyzeUploadedFiles(files: File[], currentMonth: Date, billId: s
   return {
     expenses: rawExpenses.map((expense, index) => normalizeApiExpense(expense, index)),
     warnings: payload.warnings ?? [],
-    modelName: payload.models?.vision ?? payload.models?.multimodal ?? payload.models?.llm ?? "AI 模型",
+    modelName:
+      payload.models?.active ??
+      payload.models?.vision ??
+      payload.models?.multimodal ??
+      payload.models?.llm ??
+      "AI 模型",
+  };
+}
+
+async function reanalyzeStoredAttachment(
+  attachment: Attachment,
+  currentMonth: Date,
+  billId: string,
+) {
+  const response = await fetch(
+    apiUrl(`bills/${billId}/attachments/${attachment.id}/reanalyze-expenses`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        month: monthKey(currentMonth),
+        exchangeRate,
+        audExchangeRate,
+        twdExchangeRate,
+      }),
+    },
+  );
+  const payload = (await response.json().catch(() => ({}))) as Partial<AnalyzeExpensesResponse> & {
+    error?: string;
+  };
+  if (!response.ok) {
+    throw new Error(payload.error ?? "重新识别失败");
+  }
+
+  const rawExpenses = Array.isArray(payload.expenses) ? payload.expenses : [];
+  if (rawExpenses.length === 0) {
+    throw new Error("重新识别后未发现有效消费记录");
+  }
+
+  return {
+    expenses: rawExpenses.map((expense, index) => normalizeApiExpense(expense, index)),
+    warnings: payload.warnings ?? [],
+    modelName:
+      payload.models?.active ??
+      payload.models?.seed ??
+      payload.models?.vision ??
+      "AI 模型",
   };
 }
 
@@ -428,6 +501,16 @@ function normalizeApiExpense(
         ? Math.max(0, Math.min(100, Math.round(expense.confidence)))
         : 80,
     attachment: normalizeAttachment(expense.attachment),
+    amountText:
+      typeof expense.amountText === "string" && expense.amountText ? expense.amountText : "",
+    currencyEvidence:
+      typeof expense.currencyEvidence === "string" && expense.currencyEvidence
+        ? expense.currencyEvidence
+        : "",
+    paymentMethod:
+      typeof expense.paymentMethod === "string" && expense.paymentMethod
+        ? expense.paymentMethod
+        : "",
     evidenceText:
       typeof expense.evidenceText === "string" && expense.evidenceText ? expense.evidenceText : "",
   };
@@ -460,7 +543,7 @@ function normalizeCategory(value: unknown): Category {
 }
 
 function normalizeCurrency(value: unknown): Currency {
-  if (value === "USD" || value === "TWD") {
+  if (value === "USD" || value === "AUD" || value === "TWD") {
     return value;
   }
   return "CNY";
@@ -472,6 +555,210 @@ function normalizeAmount(value: unknown) {
   return Number.isFinite(absoluteAmount) && absoluteAmount > 0 ? Number(absoluteAmount.toFixed(2)) : 0;
 }
 
+type MenuOption<T extends string> = {
+  value: T;
+  label: string;
+  Icon?: ComponentType<SVGProps<SVGSVGElement>>;
+};
+
+function MenuSelect<T extends string>({
+  value,
+  options,
+  ariaLabel,
+  buttonClassName,
+  onChange,
+}: {
+  value: T;
+  options: MenuOption<T>[];
+  ariaLabel: string;
+  buttonClassName: string;
+  onChange: (value: T) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(() =>
+    Math.max(0, options.findIndex((option) => option.value === value)),
+  );
+  const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0, width: 176 });
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const listboxId = useId();
+  const selected = options.find((option) => option.value === value) ?? options[0];
+  const SelectedIcon = selected.Icon;
+
+  const updateMenuPosition = () => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return;
+    }
+    const width = Math.max(176, rect.width);
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+    const estimatedHeight = Math.min(options.length * 48 + 12, 344);
+    const opensUpward =
+      window.innerHeight - rect.bottom < estimatedHeight + 12 && rect.top > estimatedHeight;
+    const top = opensUpward
+      ? Math.max(12, rect.top - estimatedHeight - 7)
+      : Math.min(rect.bottom + 7, window.innerHeight - estimatedHeight - 12);
+    setMenuPosition({ top, left, width });
+  };
+
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    updateMenuPosition();
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const closeWhenOutside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!buttonRef.current?.contains(target) && !menuRef.current?.contains(target)) {
+        setIsOpen(false);
+      }
+    };
+    const reposition = () => updateMenuPosition();
+    document.addEventListener("pointerdown", closeWhenOutside);
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeWhenOutside);
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    setActiveIndex(Math.max(0, options.findIndex((option) => option.value === value)));
+  }, [value]);
+
+  const selectOption = (option: MenuOption<T>) => {
+    onChange(option.value);
+    setIsOpen(false);
+    buttonRef.current?.focus();
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Tab") {
+      setIsOpen(false);
+      return;
+    }
+    if (event.key === "Escape") {
+      setIsOpen(false);
+      buttonRef.current?.focus();
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setIsOpen(true);
+      setActiveIndex((current) => {
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        return (current + direction + options.length) % options.length;
+      });
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      if (!isOpen) {
+        return;
+      }
+      event.preventDefault();
+      setActiveIndex(event.key === "Home" ? 0 : options.length - 1);
+      return;
+    }
+    if ((event.key === "Enter" || event.key === " ") && isOpen) {
+      event.preventDefault();
+      selectOption(options[activeIndex]);
+    }
+  };
+
+  const toggleMenu = () => {
+    setIsOpen((open) => {
+      if (!open) {
+        setActiveIndex(Math.max(0, options.findIndex((option) => option.value === value)));
+      }
+      return !open;
+    });
+  };
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        role="combobox"
+        aria-label={`${ariaLabel}，当前：${selected.label}`}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+        aria-controls={isOpen ? listboxId : undefined}
+        aria-activedescendant={isOpen ? `${listboxId}-option-${activeIndex}` : undefined}
+        onClick={toggleMenu}
+        onKeyDown={handleKeyDown}
+        className={`relative inline-flex items-center gap-1.5 whitespace-nowrap pr-7 transition focus:outline-none focus:ring-4 focus:ring-blue-100/70 ${buttonClassName}`}
+      >
+        {SelectedIcon ? <SelectedIcon className="size-3.5" /> : null}
+        <span>{selected.label}</span>
+        <ChevronDown
+          className={`pointer-events-none absolute right-2 size-3 opacity-60 transition-transform ${isOpen ? "rotate-180" : ""}`}
+        />
+      </button>
+      {isOpen
+        ? createPortal(
+            <div
+              ref={menuRef}
+              id={listboxId}
+              role="listbox"
+              aria-label={ariaLabel}
+              style={{
+                top: menuPosition.top,
+                left: menuPosition.left,
+                width: menuPosition.width,
+              }}
+              className="menu-pop no-print fixed z-[90] max-h-[344px] overflow-y-auto rounded-xl border border-slate-200/80 bg-white p-1.5 shadow-[0_18px_50px_rgba(15,23,42,0.18)] ring-1 ring-slate-950/5"
+            >
+              {options.map((option, index) => {
+                const OptionIcon = option.Icon;
+                const isSelected = option.value === value;
+                const isActive = index === activeIndex;
+                return (
+                  <button
+                    key={option.value}
+                    id={`${listboxId}-option-${index}`}
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    tabIndex={-1}
+                    onPointerEnter={() => setActiveIndex(index)}
+                    onClick={() => selectOption(option)}
+                    className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition ${
+                      isActive ? "bg-slate-100 text-slate-950" : "text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    <span
+                      className={`flex size-7 items-center justify-center rounded-md ${
+                        isSelected ? "bg-blue-50 text-blue-700" : "bg-slate-50 text-slate-500"
+                      }`}
+                    >
+                      {OptionIcon ? <OptionIcon className="size-3.5" /> : null}
+                    </span>
+                    <span className="flex-1">{option.label}</span>
+                    <Check
+                      className={`size-4 text-blue-600 transition-opacity ${
+                        isSelected ? "opacity-100" : "opacity-0"
+                      }`}
+                    />
+                  </button>
+                );
+              })}
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
+  );
+}
+
 function CategorySelect({
   category,
   onChange,
@@ -480,27 +767,20 @@ function CategorySelect({
   onChange: (category: Category) => void;
 }) {
   const meta = categoryMeta[category];
-  const Icon = meta.Icon;
+  const options = categories.map((item) => ({
+    value: item,
+    label: item,
+    Icon: categoryMeta[item].Icon,
+  }));
 
   return (
-    <label
-      className={`relative inline-flex whitespace-nowrap items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium ring-1 ${meta.className}`}
-    >
-      <Icon className="size-3.5" />
-      <select
-        value={category}
-        onChange={(event) => onChange(event.target.value as Category)}
-        className="cursor-pointer appearance-none bg-transparent pr-4 font-medium outline-none"
-        aria-label="修改消费类型"
-      >
-        {categories.map((item) => (
-          <option key={item} value={item}>
-            {item}
-          </option>
-        ))}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-1.5 size-3 text-current opacity-60" />
-    </label>
+    <MenuSelect
+      value={category}
+      options={options}
+      ariaLabel="修改消费类型"
+      buttonClassName={`rounded-full px-2.5 py-1.5 text-xs font-medium ring-1 ${meta.className}`}
+      onChange={onChange}
+    />
   );
 }
 
@@ -512,30 +792,22 @@ function StatusSelect({
   onChange: (status: Status) => void;
 }) {
   const isReported = status === "reported";
-  const StatusIcon = isReported ? Check : ReceiptText;
+  const options: MenuOption<Status>[] = statuses.map((item) => ({
+    ...item,
+    Icon: item.value === "reported" ? BadgeCheck : ReceiptText,
+  }));
   const className = isReported
-    ? "bg-emerald-50 text-emerald-700 ring-emerald-100"
-    : "bg-orange-50 text-orange-700 ring-orange-100";
+    ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+    : "bg-orange-50 text-orange-700 ring-orange-200";
 
   return (
-    <label
-      className={`relative inline-flex whitespace-nowrap items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium ring-1 ${className}`}
-    >
-      <StatusIcon className="size-3" />
-      <select
-        value={status}
-        onChange={(event) => onChange(event.target.value as Status)}
-        className="cursor-pointer appearance-none bg-transparent pr-4 font-medium outline-none"
-        aria-label="修改报销状态"
-      >
-        {statuses.map((item) => (
-          <option key={item.value} value={item.value}>
-            {item.label}
-          </option>
-        ))}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-1.5 size-3 text-current opacity-60" />
-    </label>
+    <MenuSelect
+      value={status}
+      options={options}
+      ariaLabel="修改报销状态"
+      buttonClassName={`rounded-lg px-2.5 py-1.5 text-xs font-medium ring-1 ${className}`}
+      onChange={onChange}
+    />
   );
 }
 
@@ -724,10 +996,14 @@ function SourceCell({
 
 function AttachmentPreview({
   attachment,
+  isReanalyzing,
   onClose,
+  onReanalyze,
 }: {
   attachment: Attachment | null;
+  isReanalyzing: boolean;
   onClose: () => void;
+  onReanalyze: (attachment: Attachment) => void;
 }) {
   if (!attachment) {
     return null;
@@ -743,14 +1019,25 @@ function AttachmentPreview({
             {image ? <ImageIcon className="size-4 text-blue-600" /> : <FileText className="size-4 text-slate-500" />}
             <p className="truncate text-sm font-semibold text-slate-800">{attachment.name}</p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="flex size-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
-            aria-label="关闭预览"
-          >
-            <X className="size-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onReanalyze(attachment)}
+              disabled={isReanalyzing}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-semibold text-blue-700 ring-1 ring-blue-200 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <RefreshCw className={`size-3.5 ${isReanalyzing ? "animate-spin" : ""}`} />
+              {isReanalyzing ? "重新识别中" : "重新识别并修复"}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex size-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+              aria-label="关闭预览"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
         </div>
         <div className="flex min-h-96 flex-1 items-center justify-center bg-slate-100 p-4">
           {image ? (
@@ -814,7 +1101,9 @@ function ExportPdfReport({
           </div>
         </div>
         <div style={{ color: "#64748b", fontSize: 13, textAlign: "right" }}>
-          <div>汇率：1 USD = {exchangeRate.toFixed(2)} CNY · 1 TWD = {twdExchangeRate.toFixed(2)} CNY</div>
+          <div>
+            汇率：1 USD = {exchangeRate.toFixed(2)} CNY · 1 AUD = {audExchangeRate.toFixed(2)} CNY · 1 TWD = {twdExchangeRate.toFixed(2)} CNY
+          </div>
           <div style={{ marginTop: 4 }}>导出时间：{new Date().toLocaleString("zh-CN")}</div>
         </div>
       </div>
@@ -884,6 +1173,7 @@ function App() {
   const [lastUpload, setLastUpload] = useState<UploadRecord | null>(null);
   const [exportNotice, setExportNotice] = useState("");
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
+  const [repairingAttachmentId, setRepairingAttachmentId] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadAreaRef = useRef<HTMLDivElement>(null);
   const pdfReportRef = useRef<HTMLDivElement>(null);
@@ -1146,6 +1436,47 @@ function App() {
     void processFiles(files);
   };
 
+  const handleReanalyzeAttachment = async (attachment: Attachment) => {
+    if (!billId || isAnalyzing || repairingAttachmentId) {
+      return;
+    }
+
+    setRepairingAttachmentId(attachment.id);
+    setExportNotice("正在用当前主模型重新识别原附件...");
+    try {
+      const result = await reanalyzeStoredAttachment(attachment, currentMonth, billId);
+      setExpenses((previous) => {
+        const replaced = previous.filter((expense) => expense.attachment?.id === attachment.id);
+        const repaired = result.expenses.map((expense, index) => {
+          const existing = replaced[index];
+          return existing
+            ? {
+                ...expense,
+                id: existing.id,
+                status: existing.status,
+                note: existing.note || expense.note,
+                recurring: existing.recurring,
+              }
+            : expense;
+        });
+        return [
+          ...repaired,
+          ...previous.filter((expense) => expense.attachment?.id !== attachment.id),
+        ];
+      });
+      setPreviewAttachment(null);
+      setExportNotice(
+        result.warnings.length > 0
+          ? `已用 ${result.modelName} 修复记录；提示：${result.warnings.join("；")}`
+          : `已用 ${result.modelName} 重新识别并替换旧记录`,
+      );
+    } catch (error) {
+      setExportNotice(error instanceof Error ? `重新识别失败：${error.message}` : "重新识别失败");
+    } finally {
+      setRepairingAttachmentId("");
+    }
+  };
+
   const handleExportPdf = async () => {
     if (isExportingPdf) {
       return;
@@ -1372,7 +1703,9 @@ function App() {
               <p className="mt-3 flex items-center gap-2 text-sm text-slate-500">
                 <span>≈ {formatUsd(summary.total / exchangeRate)}</span>
                 <RefreshCw className="size-3.5" />
-                <span>1 USD = {exchangeRate.toFixed(2)} CNY · 1 TWD = {twdExchangeRate.toFixed(2)} CNY</span>
+                <span>
+                  1 USD = {exchangeRate.toFixed(2)} CNY · 1 AUD = {audExchangeRate.toFixed(2)} CNY · 1 TWD = {twdExchangeRate.toFixed(2)} CNY
+                </span>
               </p>
             </div>
             <div className="border-t border-slate-100 p-5 md:border-t-0">
@@ -1737,7 +2070,14 @@ function App() {
           summary={filteredSummary}
         />
       </div>
-      <AttachmentPreview attachment={previewAttachment} onClose={() => setPreviewAttachment(null)} />
+      <AttachmentPreview
+        attachment={previewAttachment}
+        isReanalyzing={Boolean(
+          previewAttachment && repairingAttachmentId === previewAttachment.id,
+        )}
+        onClose={() => setPreviewAttachment(null)}
+        onReanalyze={(attachment) => void handleReanalyzeAttachment(attachment)}
+      />
     </main>
   );
 }

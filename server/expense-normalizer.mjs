@@ -6,6 +6,12 @@ const chineseMerchantPattern =
   /[\u4e00-\u9fa5]{2,}(?:有限公司|公司|商户|商行|店|科技|餐饮|酒店|银行|超市|便利|集团)/;
 const amountContextPattern =
   /金额|实付|付款|支付|交易|合计|总共|总计|充值|扣款|消费|收款|total|amount|paid|payment|transaction/i;
+const finalPaymentContextPattern =
+  /订单实付|实付(?:款|金额)?|实际(?:支付|付款)(?:金额)?|付款金额|支付金额|已支付|已付款|成交金额|扣款金额|amount\s*(?:paid|charged)|paid\s*(?:amount|total)|total\s*paid|grand\s*total|amount\s*due/i;
+const totalAmountContextPattern =
+  /商品(?:金额|总额|总价)|订单(?:金额|总额|总价)|应付(?:金额)?|合计|总计|总额|小计|共计|总共|subtotal|total|amount/i;
+const discountContextPattern =
+  /优惠(?:金额|券)?|优惠券|折扣|立减|满减|减免|共减|共优惠|已优惠|抵扣|补贴|红包|已省|节省|省下|划线价|原价|discount|coupon|voucher|saving/i;
 const identifierContextPattern =
   /订单号|商户订单|运单号|单号|流水号|手机号|卡号|尾号|order\s*no|merchant\s*order|tracking|serial|phone|card/i;
 
@@ -14,8 +20,9 @@ export function normalizeCategory(value) {
 }
 
 export function normalizeCurrency(value) {
-  if (value === "USD" || value === "TWD") {
-    return value;
+  const normalized = typeof value === "string" ? value.trim().toUpperCase() : "";
+  if (normalized === "USD" || normalized === "AUD" || normalized === "TWD") {
+    return normalized;
   }
   return "CNY";
 }
@@ -27,6 +34,14 @@ export function normalizeAmount(value) {
 }
 
 export function resolveOriginalAmount(expense) {
+  const evidenceText = [expense?.evidenceText, expense?.amountText, expense?.currencyEvidence]
+    .filter(Boolean)
+    .join(" ");
+  const preferredPaymentAmount = extractPreferredPaymentAmount(evidenceText);
+  if (preferredPaymentAmount !== null) {
+    return preferredPaymentAmount;
+  }
+
   const declaredAmountText = normalizeAmount(expense?.amountText);
   if (declaredAmountText > 0) {
     return declaredAmountText;
@@ -45,6 +60,10 @@ export function inferCurrencyFromExpense(expense) {
 
   if (hasExplicitTwdCurrencyEvidence(text)) {
     return "TWD";
+  }
+
+  if (hasExplicitAudCurrencyEvidence(text)) {
+    return "AUD";
   }
 
   if (hasExplicitCnyCurrencyEvidence(text)) {
@@ -100,6 +119,10 @@ export function isLikelyFalsePositiveExpense(expense) {
     return true;
   }
 
+  if (generatedSource && isDiscountAmountWithoutFinalPayment(text, amount)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -116,37 +139,39 @@ function extractLikelyAmount(value) {
   }
 
   const text = normalizeMoneyText(value);
-  const currencyMarked = findCurrencyMarkedAmount(text);
-  if (currencyMarked !== null) {
-    return currencyMarked;
-  }
+  const candidates = findAmountCandidates(text)
+    .filter((candidate) => candidate.currencyMarked || amountContextPattern.test(text))
+    .filter((candidate) => candidate.cue?.kind !== "discount")
+    .filter((candidate) => candidate.score > 0)
+    .sort(compareAmountCandidates);
 
-  if (!amountContextPattern.test(text)) {
+  return candidates[0]?.amount ?? null;
+}
+
+function extractPreferredPaymentAmount(value) {
+  if (typeof value !== "string" || !value.trim()) {
     return null;
   }
 
-  return findBestContextAmount(text);
-}
-
-function findCurrencyMarkedAmount(text) {
-  const patterns = [
-    /(?:NT\$|NTD|TWD|USD|US\$|RMB|CNY|¥|￥|\$)\s*([+\-]?\s*\d{1,7}(?:,\d{3})*(?:\.\d{1,2})?)/gi,
-    /([+\-]?\s*\d{1,7}(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:元|块|人民币|人民幣|USD|CNY|TWD|NTD|美元|美金)/gi,
-  ];
-
-  for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) {
-      const amount = parseAmountToken(match[1]);
-      if (amount > 0) {
-        return amount;
-      }
-    }
+  const candidates = findAmountCandidates(normalizeMoneyText(value));
+  const finalPayments = candidates
+    .filter((candidate) => candidate.cue?.kind === "final")
+    .sort(compareAmountCandidates);
+  if (finalPayments.length > 0) {
+    return finalPayments[0].amount;
   }
 
-  return null;
+  if (candidates.some((candidate) => candidate.cue?.kind === "discount")) {
+    return null;
+  }
+
+  const totals = candidates
+    .filter((candidate) => candidate.cue?.kind === "total")
+    .sort(compareAmountCandidates);
+  return totals[0]?.amount ?? null;
 }
 
-function findBestContextAmount(text) {
+function findAmountCandidates(text) {
   const candidates = [];
   const pattern = /(^|[^\d])([+\-]?\s*\d{1,7}(?:,\d{3})*(?:\.\d{1,2})?)(?![\d])/g;
 
@@ -161,21 +186,81 @@ function findBestContextAmount(text) {
 
     const token = raw.replace(/[\s,+-]/g, "");
     const context = text.slice(Math.max(0, start - 36), Math.min(text.length, end + 36));
+    const before = text.slice(Math.max(0, start - 28), start);
+    const after = text.slice(end, Math.min(text.length, end + 24));
+    const currencyMarked = hasCurrencyMarkerBefore(before) || hasCurrencyMarkerAfter(after);
+    const cue = findNearestAmountCue(text, start);
     let score = 0;
-    if (amountContextPattern.test(context)) score += 60;
+    if (currencyMarked) score += 70;
+    if (amountContextPattern.test(context)) score += 50;
     if (/[-]/.test(raw)) score += 30;
     if (/\.\d{1,2}/.test(raw)) score += 20;
+    if (cue?.kind === "final") score += 400 - cue.distance;
+    if (cue?.kind === "total") score += 220 - cue.distance;
+    if (cue?.kind === "discount") score -= 500;
     if (identifierContextPattern.test(context)) score -= 80;
     if (looksLikeDateOrTime(token, context)) score -= 80;
     if (/^\d{5,}$/.test(token) && !/\.\d{1,2}/.test(raw)) score -= 60;
 
-    if (score > 0) {
-      candidates.push({ amount, score });
-    }
+    candidates.push({ amount, score, start, currencyMarked, cue });
   }
 
-  candidates.sort((left, right) => right.score - left.score);
-  return candidates[0]?.amount ?? null;
+  return candidates;
+}
+
+function compareAmountCandidates(left, right) {
+  return right.score - left.score || right.start - left.start;
+}
+
+function findNearestAmountCue(text, amountStart) {
+  const prefixStart = Math.max(0, amountStart - 40);
+  let prefix = text.slice(prefixStart, amountStart);
+  const earlierAmounts = [
+    ...prefix.matchAll(/[+\-]?\s*\d{1,7}(?:,\d{3})*(?:\.\d{1,2})?/g),
+  ];
+  const nearestEarlierAmount = earlierAmounts.at(-1);
+  if (nearestEarlierAmount) {
+    prefix = prefix.slice(
+      (nearestEarlierAmount.index ?? 0) + nearestEarlierAmount[0].length,
+    );
+  }
+  const cues = [
+    ...findCues(prefix, finalPaymentContextPattern, "final"),
+    ...findCues(prefix, discountContextPattern, "discount"),
+    ...findCues(prefix, totalAmountContextPattern, "total"),
+  ];
+
+  cues.sort((left, right) => {
+    if (left.distance !== right.distance) {
+      return left.distance - right.distance;
+    }
+    const priority = { final: 3, discount: 2, total: 1 };
+    return priority[right.kind] - priority[left.kind];
+  });
+  return cues[0] ?? null;
+}
+
+function findCues(value, pattern, kind) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const matcher = new RegExp(pattern.source, flags);
+  const cues = [];
+  for (const match of value.matchAll(matcher)) {
+    cues.push({
+      kind,
+      distance: value.length - ((match.index ?? 0) + match[0].length),
+    });
+  }
+  return cues;
+}
+
+function hasCurrencyMarkerBefore(value) {
+  return /(?:NT\$|NTD|TWD|AU\$|A\$|AUD|USD|US\$|RMB|CNY|¥|￥|\$)\s*$/i.test(value);
+}
+
+function hasCurrencyMarkerAfter(value) {
+  return /^\s*(?:元|块|人民币|人民幣|AUD|澳元|澳币|Australian\s+dollars?|USD|CNY|TWD|NTD|美元|美金)/i.test(
+    value,
+  );
 }
 
 function parseAmountToken(value) {
@@ -184,7 +269,7 @@ function parseAmountToken(value) {
   }
 
   const cleaned = normalizeMoneyText(value)
-    .replace(/(?:NT\$|NTD|TWD|USD|US\$|RMB|CNY|¥|￥|\$|元|块|人民币|人民幣|美元|美金)/gi, "")
+    .replace(/(?:NT\$|NTD|TWD|AU\$|A\$|AUD|澳元|澳币|Australian\s+dollars?|USD|US\$|RMB|CNY|¥|￥|\$|元|块|人民币|人民幣|美元|美金)/gi, "")
     .replace(/,/g, "")
     .replace(/\s+/g, "");
   const match = cleaned.match(/[+-]?\d+(?:\.\d{1,2})?/);
@@ -213,8 +298,14 @@ function hasExplicitTwdCurrencyEvidence(value) {
   return /(?:NT\$|NTD|TWD|新台币|新臺幣)/i.test(value);
 }
 
+function hasExplicitAudCurrencyEvidence(value) {
+  return /(?:^|[^A-Z])(?:AUD|AU\$|A\$|澳元|澳币|澳幣|Australian\s+dollars?)\s*-?\d|\d[\d,]*(?:\.\d{1,2})?\s*(?:AUD|澳元|澳币|澳幣|Australian\s+dollars?)/i.test(
+    value,
+  );
+}
+
 function hasExplicitUsdCurrencyEvidence(value) {
-  return /(?:USD|US\$|美元|美金|U\.S\.?\s*dollars?|\bdollars?\b|\$)\s*-?\d|\d[\d,]*(?:\.\d{1,2})?\s*(?:USD|美元|美金|\bdollars?\b)/i.test(
+  return /(?:USD|US\$|美元|美金|U\.S\.?\s*dollars?|\bdollars?\b)\s*-?\d|(?<![A-Z])\$\s*-?\d|\d[\d,]*(?:\.\d{1,2})?\s*(?:USD|美元|美金|\bdollars?\b)/i.test(
     value,
   );
 }
@@ -236,6 +327,18 @@ function hasExplicitShippingAmount(value) {
 
   return /(?:运费|物流费|快递费|运输费)[^\d¥￥$]{0,8}(?:¥|￥|\$)?\s*\d[\d,]*(?:\.\d{1,2})?|(?:¥|￥|\$)?\s*\d[\d,]*(?:\.\d{1,2})?[^\d]{0,8}(?:运费|物流费|快递费|运输费)/.test(
     value,
+  );
+}
+
+function isDiscountAmountWithoutFinalPayment(value, amount) {
+  const candidates = findAmountCandidates(normalizeMoneyText(value));
+  if (candidates.some((candidate) => candidate.cue?.kind === "final")) {
+    return false;
+  }
+
+  return candidates.some(
+    (candidate) =>
+      candidate.cue?.kind === "discount" && Math.abs(candidate.amount - amount) < 0.005,
   );
 }
 

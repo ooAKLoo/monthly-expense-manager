@@ -144,15 +144,23 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   await amountInput.press("Enter");
   await expect(app.getByText("（原币 $30.00）")).toBeVisible();
 
-  const categorySelect = app.getByLabel("修改消费类型").first();
-  await categorySelect.selectOption("差旅");
-  await expect(categorySelect).toHaveValue("差旅");
+  const categorySelect = app.getByRole("combobox", { name: /修改消费类型/ }).first();
+  await categorySelect.click();
+  await expect(categorySelect).toHaveAttribute("aria-expanded", "true");
+  await page.getByRole("option", { name: "差旅", exact: true }).click();
+  await expect(categorySelect).toContainText("差旅");
+  await expect(categorySelect).toHaveAttribute("aria-expanded", "false");
 
-  const statusSelect = app.getByLabel("修改报销状态").first();
-  await statusSelect.selectOption("reported");
-  await expect(statusSelect).toHaveValue("reported");
-  await statusSelect.selectOption("unreported");
-  await expect(statusSelect).toHaveValue("unreported");
+  const statusSelect = app.getByRole("combobox", { name: /修改报销状态/ }).first();
+  await statusSelect.click();
+  await page.getByRole("option", { name: "已报销", exact: true }).click();
+  await expect(statusSelect).toContainText("已报销");
+  await statusSelect.press("ArrowDown");
+  await statusSelect.press("Enter");
+  await expect(statusSelect).toContainText("未报销");
+  await statusSelect.click();
+  await statusSelect.press("Escape");
+  await expect(statusSelect).toHaveAttribute("aria-expanded", "false");
 
   await uploadZone.evaluate((element) => {
     const dataTransfer = new DataTransfer();
@@ -188,4 +196,159 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   expect(download.suggestedFilename()).toMatch(
     /^月度消费-2024-06-全部-搜索-UberReceipt（结转）-\d+\.pdf$/,
   );
+});
+
+test("澳元按 AUD 汇率展示且订单使用实付金额", async ({ page }) => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lz8eVgAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  await page.route("**/api/bills/aud-test", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          bill: {
+            id: "aud-test",
+            currentMonth: "2026-07",
+            expenses: [],
+          },
+        }),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ bill: await route.request().postDataJSON() }),
+    });
+  });
+
+  await page.route("**/api/bills/aud-test/analyze-expenses", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        expenses: [
+          {
+            id: "chatgpt-aud-1",
+            date: "2026-07-31",
+            description: "ChatGPT 订阅",
+            category: "订阅",
+            originalAmount: 185.29,
+            currency: "AUD",
+            merchant: "ChatGPT",
+            status: "unreported",
+            note: "IMG_7498",
+            source: "上传图片",
+            confidence: 98,
+            evidenceText: "Total A$185.29 AUD",
+          },
+          {
+            id: "chatgpt-aud-2",
+            date: "2026-07-31",
+            description: "ChatGPT 订阅",
+            category: "订阅",
+            originalAmount: 152.84,
+            currency: "AUD",
+            merchant: "ChatGPT",
+            status: "unreported",
+            note: "IMG_7499",
+            source: "上传图片",
+            confidence: 98,
+            evidenceText: "Total AU$152.84",
+          },
+          {
+            id: "glue-gun-paid",
+            date: "2026-07-23",
+            description: "绿林细嘴热熔胶枪成人手工",
+            category: "购物",
+            originalAmount: 25.9,
+            currency: "CNY",
+            merchant: "绿林官方旗舰店",
+            status: "unreported",
+            note: "",
+            source: "上传图片",
+            confidence: 96,
+            evidenceText: "商品总额 ¥29.90；优惠金额 ¥4.00；实付款 ¥25.90",
+            attachment: {
+              id: "att-glue",
+              name: "glue-gun.png",
+              mimeType: "image/png",
+              size: 68,
+              url: "api/bills/aud-test/attachments/att-glue",
+            },
+          },
+        ],
+        warnings: [],
+        models: { vision: "qwen-vl-plus" },
+      }),
+    });
+  });
+
+  await page.route("**/api/bills/aud-test/attachments/att-glue", async (route) => {
+    await route.fulfill({ body: png, contentType: "image/png" });
+  });
+
+  await page.route(
+    "**/api/bills/aud-test/attachments/att-glue/reanalyze-expenses",
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          expenses: [
+            {
+              id: "glue-gun-repaired",
+              date: "2026-07-23",
+              description: "绿林细嘴热熔胶枪成人手工",
+              category: "购物",
+              originalAmount: 35.9,
+              currency: "CNY",
+              merchant: "绿林官方旗舰店",
+              status: "unreported",
+              note: "重新识别",
+              source: "上传图片",
+              confidence: 98,
+              evidenceText: "商品金额 ¥39.90；优惠 ¥4.00；实付款 ¥35.90",
+              attachment: {
+                id: "att-glue",
+                name: "glue-gun.png",
+                mimeType: "image/png",
+                size: 68,
+                url: "api/bills/aud-test/attachments/att-glue",
+              },
+            },
+          ],
+          warnings: [],
+          models: {
+            activeProvider: "seed",
+            active: "doubao-seed-2-0-lite-260428",
+          },
+        }),
+      });
+    },
+  );
+
+  await page.goto("/#bill=aud-test");
+  const uploadZone = page.getByRole("button", { name: "上传消费截图或 PDF" });
+  const dropData = await page.evaluateHandle(() => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(new File(["receipt"], "expenses.png", { type: "image/png" }));
+    return dataTransfer;
+  });
+  await uploadZone.dispatchEvent("drop", { dataTransfer: dropData });
+
+  await expect(page.getByText(/已生成 3 条/)).toBeVisible({ timeout: 4000 });
+  const tableBody = page.locator("tbody.divide-y");
+  await expect(tableBody.getByText("（原币 A$185.29）")).toBeVisible();
+  await expect(tableBody.getByText("（原币 A$152.84）")).toBeVisible();
+  await expect(tableBody.getByText("¥870.86")).toBeVisible();
+  await expect(tableBody.getByText("¥718.35")).toBeVisible();
+  await expect(tableBody.getByText("¥25.90")).toBeVisible();
+  await expect(page.getByText("¥1,335.94")).toHaveCount(0);
+  await expect(page.getByText("¥1,101.98")).toHaveCount(0);
+
+  await page.locator('button[title="glue-gun.png"]').click();
+  await page.getByRole("button", { name: "重新识别并修复" }).click();
+  await expect(tableBody.getByText("¥35.90")).toBeVisible();
+  await expect(page.getByText(/doubao-seed-2-0-lite-260428/)).toBeVisible();
 });
