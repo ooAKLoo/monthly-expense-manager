@@ -583,6 +583,7 @@ function MenuSelect<T extends string>({
   const menuRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
   const selected = options.find((option) => option.value === value) ?? options[0];
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
   const SelectedIcon = selected.Icon;
 
   const updateMenuPosition = () => {
@@ -630,11 +631,8 @@ function MenuSelect<T extends string>({
     };
   }, [isOpen]);
 
-  useEffect(() => {
-    setActiveIndex(Math.max(0, options.findIndex((option) => option.value === value)));
-  }, [value]);
-
   const selectOption = (option: MenuOption<T>) => {
+    setActiveIndex(Math.max(0, options.findIndex((item) => item.value === option.value)));
     onChange(option.value);
     setIsOpen(false);
     buttonRef.current?.focus();
@@ -652,11 +650,10 @@ function MenuSelect<T extends string>({
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const currentIndex = isOpen ? activeIndex : selectedIndex;
+      setActiveIndex((currentIndex + direction + options.length) % options.length);
       setIsOpen(true);
-      setActiveIndex((current) => {
-        const direction = event.key === "ArrowDown" ? 1 : -1;
-        return (current + direction + options.length) % options.length;
-      });
       return;
     }
     if (event.key === "Home" || event.key === "End") {
@@ -676,7 +673,7 @@ function MenuSelect<T extends string>({
   const toggleMenu = () => {
     setIsOpen((open) => {
       if (!open) {
-        setActiveIndex(Math.max(0, options.findIndex((option) => option.value === value)));
+        setActiveIndex(selectedIndex);
       }
       return !open;
     });
@@ -729,7 +726,7 @@ function MenuSelect<T extends string>({
                     role="option"
                     aria-selected={isSelected}
                     tabIndex={-1}
-                    onPointerEnter={() => setActiveIndex(index)}
+                    onPointerMove={() => setActiveIndex(index)}
                     onClick={() => selectOption(option)}
                     className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition ${
                       isActive ? "bg-slate-100 text-slate-950" : "text-slate-600 hover:bg-slate-50"
