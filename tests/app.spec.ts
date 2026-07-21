@@ -222,12 +222,12 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   await statusSelect.press("Escape");
   await expect(statusSelect).toHaveAttribute("aria-expanded", "false");
 
-  await uploadZone.evaluate((element) => {
+  await page.evaluate(() => {
     const dataTransfer = new DataTransfer();
     dataTransfer.items.add(new File(["receipt"], "clipboard.png", { type: "image/png" }));
     const event = new Event("paste", { bubbles: true, cancelable: true });
     Object.defineProperty(event, "clipboardData", { value: dataTransfer });
-    element.dispatchEvent(event);
+    document.body.dispatchEvent(event);
   });
   await expect(app.getByText("Clipboard Receipt", { exact: true })).toBeVisible({ timeout: 4000 });
 
@@ -571,6 +571,14 @@ test("支持跨页全选、Shift 连选和确认后批量删除", async ({ page 
 
   await page.goto("/#bill=selection-test");
   const app = page.locator(".print-shell");
+  const settleButton = app.getByRole("button", { name: /一键结清未报销/ });
+  await settleButton.click();
+  await expect(app.getByText("已结清 5 条未报销消费")).toBeVisible();
+  await expect(
+    app.locator("tbody tr").filter({ hasText: "记录 2" }).getByRole("combobox", { name: /修改报销状态/ }),
+  ).toContainText("已报销");
+  await expect(settleButton).toBeDisabled();
+
   const selectAll = app.getByRole("checkbox", { name: "全选当前筛选结果" });
   await selectAll.click();
   await expect(selectAll).toHaveAttribute("aria-checked", "true");

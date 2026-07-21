@@ -279,6 +279,13 @@ function filesFromClipboard(items: DataTransferItemList) {
     .filter(isAcceptedUploadFile);
 }
 
+function isTextEditingTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLElement &&
+    Boolean(target.closest('input, textarea, [contenteditable="true"], [role="textbox"]'))
+  );
+}
+
 function monthKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
@@ -1990,6 +1997,11 @@ function App() {
     });
   }, [query, rangeExpenses, statusFilter]);
 
+  const unreportedRangeExpenseCount = useMemo(
+    () => rangeExpenses.filter((expense) => expense.status === "unreported").length,
+    [rangeExpenses],
+  );
+
   const totalPages = Math.max(1, Math.ceil(filteredExpenses.length / pageSize));
   const visiblePageNumbers = useMemo(
     () => getVisiblePageNumbers(currentPage, totalPages),
@@ -2186,6 +2198,30 @@ function App() {
     event.preventDefault();
     void processFiles(files);
   };
+
+  useEffect(() => {
+    const handleWindowPaste = (event: WindowEventMap["paste"]) => {
+      if (event.defaultPrevented || isTextEditingTarget(event.target)) {
+        return;
+      }
+
+      const clipboardItems = event.clipboardData?.items;
+      if (!clipboardItems) {
+        return;
+      }
+
+      const files = filesFromClipboard(clipboardItems);
+      if (files.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      void processFiles(files);
+    };
+
+    window.addEventListener("paste", handleWindowPaste);
+    return () => window.removeEventListener("paste", handleWindowPaste);
+  }, [processFiles]);
 
   const handleAddAttachments = async (expenseId: string, files: File[]) => {
     if (!billId || files.length === 0 || uploadingAttachmentExpenseId) {
@@ -2451,6 +2487,21 @@ function App() {
       previous.map((expense) => (ids.has(expense.id) ? { ...expense, status } : expense)),
     );
     setExportNotice(`已将 ${ids.size} 条消费记录改为${statusLabel}`);
+  };
+
+  const settleUnreportedExpenses = () => {
+    const ids = new Set(
+      rangeExpenses
+        .filter((expense) => expense.status === "unreported")
+        .map((expense) => expense.id),
+    );
+    if (ids.size === 0) {
+      return;
+    }
+    setExpenses((previous) =>
+      previous.map((expense) => (ids.has(expense.id) ? { ...expense, status: "reported" } : expense)),
+    );
+    setExportNotice(`已结清 ${ids.size} 条未报销消费`);
   };
 
   const confirmDeleteExpenses = () => {
@@ -2768,6 +2819,16 @@ function App() {
                 <button className="inline-flex h-9 items-center gap-2 rounded-md px-2 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-800">
                   <Columns3 className="size-4" />
                   自定义列
+                </button>
+                <button
+                  type="button"
+                  onClick={settleUnreportedExpenses}
+                  disabled={unreportedRangeExpenseCount === 0}
+                  className="inline-flex h-9 items-center gap-2 rounded-md bg-emerald-600 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+                >
+                  <BadgeCheck className="size-4" />
+                  一键结清未报销
+                  <span className="rounded-full bg-white/20 px-1.5 py-0.5 text-xs">{unreportedRangeExpenseCount} 条</span>
                 </button>
               </div>
             </div>
