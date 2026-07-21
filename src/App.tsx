@@ -700,12 +700,16 @@ function MenuSelect<T extends string>({
   options,
   ariaLabel,
   buttonClassName,
+  triggerLabel,
+  triggerIcon,
   onChange,
 }: {
-  value: T;
+  value: T | null;
   options: MenuOption<T>[];
   ariaLabel: string;
   buttonClassName: string;
+  triggerLabel?: string;
+  triggerIcon?: ComponentType<SVGProps<SVGSVGElement>>;
   onChange: (value: T) => void;
 }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -716,9 +720,10 @@ function MenuSelect<T extends string>({
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
-  const selected = options.find((option) => option.value === value) ?? options[0];
+  const selected = options.find((option) => option.value === value);
   const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
-  const SelectedIcon = selected.Icon;
+  const selectedLabel = selected?.label ?? triggerLabel ?? options[0].label;
+  const SelectedIcon = selected?.Icon ?? triggerIcon;
 
   const updateMenuPosition = () => {
     const rect = buttonRef.current?.getBoundingClientRect();
@@ -819,7 +824,7 @@ function MenuSelect<T extends string>({
         ref={buttonRef}
         type="button"
         role="combobox"
-        aria-label={`${ariaLabel}，当前：${selected.label}`}
+        aria-label={`${ariaLabel}，当前：${selectedLabel}`}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         aria-controls={isOpen ? listboxId : undefined}
@@ -829,7 +834,7 @@ function MenuSelect<T extends string>({
         className={`relative inline-flex items-center gap-1.5 whitespace-nowrap pr-7 transition focus:outline-none focus:ring-4 focus:ring-blue-100/70 ${buttonClassName}`}
       >
         {SelectedIcon ? <SelectedIcon className="size-3.5" /> : null}
-        <span>{selected.label}</span>
+        <span>{selectedLabel}</span>
         <ChevronDown
           className={`pointer-events-none absolute right-2 size-3 opacity-60 transition-transform ${isOpen ? "rotate-180" : ""}`}
         />
@@ -1120,6 +1125,25 @@ function StatusSelect({
       options={options}
       ariaLabel="修改报销状态"
       buttonClassName={`rounded-lg px-2.5 py-1.5 text-xs font-medium ring-1 ${className}`}
+      onChange={onChange}
+    />
+  );
+}
+
+function BatchStatusSelect({ onChange }: { onChange: (status: Status) => void }) {
+  const options: MenuOption<Status>[] = statuses.map((item) => ({
+    ...item,
+    Icon: item.value === "reported" ? BadgeCheck : ReceiptText,
+  }));
+
+  return (
+    <MenuSelect
+      value={null}
+      options={options}
+      ariaLabel="批量修改报销状态"
+      triggerLabel="修改状态"
+      triggerIcon={BadgeCheck}
+      buttonClassName="h-8 rounded-lg bg-white px-3 text-xs font-semibold text-blue-700 shadow-sm ring-1 ring-blue-200 hover:bg-blue-100"
       onChange={onChange}
     />
   );
@@ -2417,6 +2441,18 @@ function App() {
     selectionAnchorIdRef.current = null;
   };
 
+  const updateSelectedExpensesStatus = (status: Status) => {
+    const ids = new Set(selectedExpenseIds);
+    if (ids.size === 0) {
+      return;
+    }
+    const statusLabel = statuses.find((item) => item.value === status)?.label ?? status;
+    setExpenses((previous) =>
+      previous.map((expense) => (ids.has(expense.id) ? { ...expense, status } : expense)),
+    );
+    setExportNotice(`已将 ${ids.size} 条消费记录改为${statusLabel}`);
+  };
+
   const confirmDeleteExpenses = () => {
     const ids = new Set(pendingDeleteIds);
     setExpenses((previous) => previous.filter((expense) => !ids.has(expense.id)));
@@ -2761,6 +2797,7 @@ function App() {
                     <X className="size-3.5" />
                     取消选择
                   </button>
+                  <BatchStatusSelect onChange={updateSelectedExpensesStatus} />
                   <button
                     type="button"
                     onClick={() => setPendingDeleteIds([...selectedExpenseIds])}

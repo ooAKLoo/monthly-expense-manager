@@ -591,6 +591,17 @@ test("支持跨页全选、Shift 连选和确认后批量删除", async ({ page 
   await expect(app.getByText("已选择 4 条")).toBeVisible();
   await expect(selectAll).toHaveAttribute("aria-checked", "mixed");
 
+  const bulkStatusSelect = app.getByRole("combobox", { name: /批量修改报销状态/ });
+  await bulkStatusSelect.click();
+  await page.getByRole("option", { name: "未报销", exact: true }).click();
+  await expect(app.getByText("已将 4 条消费记录改为未报销")).toBeVisible();
+  await expect(
+    app.locator("tbody tr").filter({ hasText: "记录 1" }).getByRole("combobox", { name: /修改报销状态/ }),
+  ).toContainText("未报销");
+  await expect(
+    app.locator("tbody tr").filter({ hasText: "记录 4" }).getByRole("combobox", { name: /修改报销状态/ }),
+  ).toContainText("未报销");
+
   await app.getByRole("button", { name: "删除 4 条" }).click();
   const deleteDialog = page.getByRole("dialog", { name: /删除 4 条消费记录/ });
   await expect(deleteDialog).toContainText("删除 4 条消费记录");
