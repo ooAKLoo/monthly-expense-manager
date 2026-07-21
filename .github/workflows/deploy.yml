@@ -101,6 +101,13 @@ jobs:
           fi
 
           cd "$RELEASE_DIR"
+          NODE22_BIN="/opt/lula/runtime/node22/bin"
+          if [ ! -x "$NODE22_BIN/node" ] || [ ! -x "$NODE22_BIN/npm" ]; then
+            echo "Missing isolated Node 22 runtime at $NODE22_BIN."
+            exit 1
+          fi
+          export PATH="$NODE22_BIN:$PATH"
+          node --version
           npm ci --omit=dev
 
           ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
