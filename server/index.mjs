@@ -27,6 +27,7 @@ import {
   normalizeReferenceDate,
 } from "./receipt-date.mjs";
 import { callArkResponses, callChatCompletions } from "./model-clients.mjs";
+import { createBillStore } from "./bill-store.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -86,6 +87,15 @@ await fs.mkdir(billsDir, { recursive: true });
 await fs.mkdir(attachmentsDir, { recursive: true });
 await fs.mkdir(modelEvaluationsDir, { recursive: true });
 
+const billStore = await createBillStore({
+  dataDir: config.dataDir,
+  normalizeBill: normalizeBillPayload,
+});
+const billMigration = await billStore.migrateJsonBills();
+if (billMigration.imported > 0) {
+  console.log(`Imported ${billMigration.imported} JSON bill(s) into ${billStore.databasePath}`);
+}
+
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
@@ -129,6 +139,26 @@ app.get("/api/bills/:billId", async (request, response) => {
 
   const bill = await readBill(billId);
   response.json({ bill });
+});
+
+app.get("/api/bills/:billId/expenses", async (request, response) => {
+  const billId = normalizeId(request.params.billId);
+  if (!billId) {
+    response.status(400).json({ error: "账单 ID 无效" });
+    return;
+  }
+
+  await readBill(billId);
+  response.json(
+    billStore.listExpenses(billId, {
+      page: request.query.page,
+      pageSize: request.query.pageSize,
+      start: request.query.start,
+      end: request.query.end,
+      status: request.query.status,
+      query: request.query.query,
+    }),
+  );
 });
 
 app.put("/api/bills/:billId", async (request, response) => {
@@ -472,32 +502,19 @@ function createDefaultBill(id) {
   };
 }
 
-function getBillPath(id) {
-  return path.join(billsDir, `${id}.json`);
-}
-
 async function readBill(id) {
-  try {
-    const raw = await fs.readFile(getBillPath(id), "utf8");
-    return normalizeBillPayload(id, JSON.parse(raw));
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      throw error;
-    }
-
-    const bill = createDefaultBill(id);
-    await saveBill(bill);
-    return bill;
+  const stored = billStore.readBill(id);
+  if (stored) {
+    return stored;
   }
+  const bill = createDefaultBill(id);
+  await saveBill(bill);
+  return bill;
 }
 
 async function saveBill(bill) {
-  await fs.mkdir(billsDir, { recursive: true });
   const normalized = normalizeBillPayload(bill.id, bill);
-  const target = getBillPath(normalized.id);
-  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(temporary, JSON.stringify(normalized, null, 2), "utf8");
-  await fs.rename(temporary, target);
+  billStore.saveBill(normalized);
 }
 
 function normalizeBillPayload(id, payload) {

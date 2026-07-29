@@ -66,6 +66,21 @@ npm run repair:data -- --apply
 npm run build
 ```
 
+## 生产数据
+
+账单和消费记录存放在 `EXPENSE_DATA_DIR/monthly-expenses.sqlite`，数据库使用 SQLite
+WAL 模式并为账单、日期、报销状态和分类建立索引。附件原文件仍保存在
+`EXPENSE_DATA_DIR/attachments`，避免把大文件写入数据库。
+
+服务首次启动时会把旧的 `EXPENSE_DATA_DIR/bills/*.json` 自动导入数据库；旧 JSON
+不会被删除，可作为迁移回退副本。消费记录分页接口示例：
+
+```bash
+curl "http://127.0.0.1:8788/api/bills/your-bill-id/expenses?page=1&pageSize=20&start=2026-07-01&end=2026-07-31&status=unreported&query=午餐"
+```
+
+接口单页最多返回 100 条。当前网页的消费明细默认每页显示 8 条。
+
 ## 测试
 
 ```bash
