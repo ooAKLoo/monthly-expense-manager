@@ -1,6 +1,6 @@
 import { ComponentType, KeyboardEvent, SVGProps, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { BadgeCheck, BriefcaseBusiness, CalendarDays, CalendarRange, Check, ChevronDown, Coffee, Home, Plane, ReceiptText, RefreshCw, Repeat2, ShoppingBag, TrainFront } from "lucide-react";
+import { BadgeCheck, BriefcaseBusiness, CalendarDays, CalendarRange, Check, ChevronDown, Coffee, Home, Pencil, Plane, ReceiptText, RefreshCw, Repeat2, ShoppingBag, TrainFront } from "lucide-react";
 import {
   Category,
   DateRange,
@@ -490,6 +490,91 @@ export function BatchStatusSelect({ onChange }: { onChange: (status: Status) => 
       buttonClassName="h-8 rounded-lg bg-white px-3 text-xs font-semibold text-blue-700 shadow-sm ring-1 ring-blue-200 hover:bg-blue-100"
       onChange={onChange}
     />
+  );
+}
+
+export function InlineEditCell({
+  value,
+  ariaLabel,
+  type = "text",
+  placeholder = "未填写",
+  displayValue,
+  onChange,
+}: {
+  value: string;
+  ariaLabel: string;
+  type?: "text" | "date";
+  placeholder?: string;
+  displayValue?: string;
+  onChange: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const [isEditing, setIsEditing] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!isEditing) {
+      setDraft(value);
+    }
+  }, [isEditing, value]);
+
+  useEffect(() => {
+    if (!isEditing) {
+      return;
+    }
+    inputRef.current?.focus();
+    if (type === "text") {
+      inputRef.current?.select();
+    }
+  }, [isEditing, type]);
+
+  const commit = () => {
+    const nextValue = draft.trim();
+    if (nextValue && nextValue !== value) {
+      onChange(nextValue);
+    } else if (!nextValue) {
+      setDraft(value);
+    }
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <input
+        ref={inputRef}
+        type={type}
+        value={draft}
+        aria-label={ariaLabel}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.currentTarget.blur();
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setDraft(value);
+            setIsEditing(false);
+          }
+        }}
+        className="h-8 w-full min-w-0 rounded-md bg-white px-2 text-sm text-slate-800 outline-none ring-1 ring-blue-300 focus:ring-4 focus:ring-blue-100"
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      aria-label={ariaLabel}
+      title={ariaLabel}
+      onClick={() => setIsEditing(true)}
+      className="group flex min-h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left outline-none transition hover:bg-slate-100 focus:ring-4 focus:ring-blue-100"
+    >
+      <span className={`min-w-0 flex-1 truncate ${value ? "text-slate-700" : "text-slate-400"}`}>
+        {displayValue || value || placeholder}
+      </span>
+      <Pencil className="size-3 shrink-0 text-slate-400 opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100" />
+    </button>
   );
 }
 

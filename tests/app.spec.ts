@@ -167,6 +167,18 @@ test("跨月份管理未报销消费、上传票据和触发导出", async ({ pa
   await searchInput.click();
   await expect(searchInput).toBeFocused();
 
+  await app.getByRole("button", { name: "修改日期：Uber Receipt 2" }).click();
+  const dateInput = app.getByLabel("修改日期：Uber Receipt 2");
+  await dateInput.fill("2024-03-15");
+  await dateInput.press("Enter");
+  await expect(app.getByText("2024/03/15", { exact: true })).toBeVisible();
+
+  await app.getByRole("button", { name: "修改描述：Uber Receipt 2" }).click();
+  const descriptionInput = app.getByLabel("修改描述：Uber Receipt 2");
+  await descriptionInput.fill("跨月打车");
+  await descriptionInput.press("Enter");
+  await expect(app.getByText("跨月打车", { exact: true })).toBeVisible();
+
   await app.getByText("（原币 $22.80）").click();
   const amountInput = app.locator('input[aria-label="修改金额"]').first();
   await expect(amountInput).toHaveValue("22.8");
@@ -246,7 +258,7 @@ test("跨月份管理未报销消费、上传票据和触发导出", async ({ pa
   }).toBe(2);
 
   await app.getByPlaceholder("搜索商家、备注").fill("Uber Receipt");
-  await expect(app.getByText("共 2 条记录")).toBeVisible();
+  await expect(app.getByText("共 1 条记录")).toBeVisible();
 
   const downloadPromise = page.waitForEvent("download");
   await app.getByRole("button", { name: "导出 PDF" }).click();

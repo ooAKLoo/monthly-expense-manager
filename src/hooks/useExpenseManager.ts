@@ -575,7 +575,9 @@ export function useExpenseManager() {
 
   const updateExpense = (
     id: string,
-    changes: Partial<Pick<Expense, "category" | "status" | "originalAmount">>,
+    changes: Partial<
+      Pick<Expense, "date" | "description" | "category" | "originalAmount" | "merchant" | "status" | "note">
+    >,
   ) => {
     setExpenses((previous) =>
       previous.map((expense) => (expense.id === id ? { ...expense, ...changes } : expense)),

@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 
 
-import { AnalysisProgress, AmountCell, BatchStatusSelect, CategorySelect, DateRangePicker, StatusSelect } from "./components/ExpenseControls";
+import { AnalysisProgress, AmountCell, BatchStatusSelect, CategorySelect, DateRangePicker, InlineEditCell, StatusSelect } from "./components/ExpenseControls";
 import { AttachmentPreview, SourceCell } from "./components/ExpenseAttachments";
 import { DeleteExpensesDialog, EmptyState, ExportPdfReport, SelectionButton } from "./components/ExpenseSupport";
 import {
@@ -460,13 +460,21 @@ function App() {
                               onToggle={(shiftKey) => toggleExpenseSelection(expense.id, shiftKey)}
                             />
                           </td>
-                          <td className="whitespace-nowrap px-4 py-3 font-medium text-slate-600">{expense.date.replaceAll("-", "/")}</td>
+                          <td className="whitespace-nowrap px-2 py-2">
+                            <InlineEditCell
+                              type="date"
+                              value={expense.date}
+                              displayValue={expense.date.replaceAll("-", "/")}
+                              ariaLabel={`修改日期：${expense.description}`}
+                              onChange={(date) => updateExpense(expense.id, { date })}
+                            />
+                          </td>
                           <td className="px-4 py-3 font-medium text-slate-800">
-                            <div className="min-w-0">
-                              <div className="flex min-w-0 items-center gap-2">
-                                <span className="truncate">{expense.description}</span>
-                              </div>
-                            </div>
+                            <InlineEditCell
+                              value={expense.description}
+                              ariaLabel={`修改描述：${expense.description}`}
+                              onChange={(description) => updateExpense(expense.id, { description })}
+                            />
                           </td>
                           <td className="px-4 py-3">
                             <CategorySelect
@@ -481,7 +489,11 @@ function App() {
                             />
                           </td>
                           <td className="px-4 py-3">
-                            <span className="block truncate">{expense.merchant}</span>
+                            <InlineEditCell
+                              value={expense.merchant}
+                              ariaLabel={`修改商家：${expense.description}`}
+                              onChange={(merchant) => updateExpense(expense.id, { merchant })}
+                            />
                           </td>
                           <td className="whitespace-nowrap px-4 py-3">
                             <StatusSelect
@@ -503,7 +515,11 @@ function App() {
                             />
                           </td>
                           <td className="px-4 py-3 text-slate-500">
-                            <span className="block truncate">{expense.note}</span>
+                            <InlineEditCell
+                              value={expense.note}
+                              ariaLabel={`修改备注：${expense.description}`}
+                              onChange={(note) => updateExpense(expense.id, { note })}
+                            />
                           </td>
                         </tr>
                       ))}
