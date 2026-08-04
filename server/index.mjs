@@ -561,6 +561,11 @@ function normalizeExpensePayload(expense, index, billId) {
     currencyEvidence: stringOrFallback(expense?.currencyEvidence, ""),
     paymentMethod: stringOrFallback(expense?.paymentMethod, ""),
     evidenceText: stringOrFallback(expense?.evidenceText, ""),
+    carryoverFromId: stringOrFallback(expense?.carryoverFromId, ""),
+    carryoverFromDate:
+      typeof expense?.carryoverFromDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(expense.carryoverFromDate)
+        ? expense.carryoverFromDate
+        : "",
   };
 }
 
