@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("管理月度消费、上传票据、迁移下月和触发导出", async ({ page }) => {
+test("跨月份管理未报销消费、上传票据和触发导出", async ({ page }) => {
   const app = page.locator(".print-shell");
   const png = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lz8eVgAAAABJRU5ErkJggg==",
@@ -84,7 +84,7 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
             },
             {
               id: "test-uber-2",
-              date: "2024-05-27",
+              date: "2024-04-27",
               description: "Uber Receipt 2",
               category: "交通",
               originalAmount: 164,
@@ -140,10 +140,10 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
 
   await page.goto("/#bill=e2e-test");
 
-  await expect(app.getByRole("heading", { name: "月度消费管理" })).toBeVisible();
-  await expect(app.getByText("2024年5月", { exact: true })).toBeVisible();
-  await expect(app.getByText("区间总金额（人民币）")).toBeVisible();
-  await expect(app.getByText("所选日期范围暂无消费记录")).toBeVisible();
+  await expect(app.getByRole("heading", { name: "消费报销管理" })).toBeVisible();
+  await expect(app.getByText("全部待报销", { exact: true })).toBeVisible();
+  await expect(app.getByText("待报销总金额（人民币）")).toBeVisible();
+  await expect(app.getByText("这里暂时没有消费记录")).toBeVisible();
 
   const uploadZone = app.getByRole("button", { name: "上传消费截图或 PDF" });
   const dropData = await page.evaluateHandle(() => {
@@ -155,6 +155,7 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
 
   await expect(app.getByText(/已生成 2 条/)).toBeVisible({ timeout: 4000 });
   await expect(app.getByText("Uber Receipt", { exact: true })).toBeVisible();
+  await expect(app.getByText("2024/04/27", { exact: true })).toBeVisible();
   await expect(app.locator("thead th").filter({ hasText: /^金额$/ })).toBeVisible();
   await expect(app.locator("thead th").filter({ hasText: "金额（原币）" })).toHaveCount(0);
   await expect(app.locator("thead th").filter({ hasText: "金额（CNY）" })).toHaveCount(0);
@@ -162,31 +163,9 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   await expect(app.getByText("¥164.39")).toBeVisible();
   await expect(app.locator('button[title="删除"]')).toHaveCount(0);
 
-  await app.getByRole("button", { name: /修改日期范围/ }).click();
-  const rangeDialog = page.getByRole("dialog", { name: "精确日期范围" });
-  await expect(rangeDialog.getByLabel("开始日期")).toBeFocused();
-  await rangeDialog.getByLabel("开始日期").fill("2024-05-28");
-  await rangeDialog.getByLabel("结束日期").fill("2024-05-28");
-  await rangeDialog.getByRole("button", { name: "应用范围" }).click();
-  await expect(app.getByRole("button", { name: /修改日期范围/ })).toContainText(
-    "2024/05/28 - 2024/05/28",
-  );
-  await expect.poll(() => {
-    const savedRange = latestSavedBill?.dateRange as { start?: string; end?: string } | undefined;
-    return `${savedRange?.start ?? ""}/${savedRange?.end ?? ""}`;
-  }).toBe("2024-05-28/2024-05-28");
-  await expect(app.getByText("Uber Receipt 2", { exact: true })).toHaveCount(0);
-  await expect(app.getByText("共 1 条记录")).toBeVisible();
-
-  await app.getByRole("button", { name: /修改日期范围/ }).click();
-  await rangeDialog.getByRole("button", { name: "恢复整月" }).click();
-  await rangeDialog.getByRole("button", { name: "应用范围" }).click();
-  await expect(app.getByText("Uber Receipt 2", { exact: true })).toBeVisible();
-  await app.getByRole("button", { name: /修改日期范围/ }).click();
   const searchInput = app.getByPlaceholder("搜索商家、备注");
   await searchInput.click();
   await expect(searchInput).toBeFocused();
-  await expect(rangeDialog).toHaveCount(0);
 
   await app.getByText("（原币 $22.80）").click();
   const amountInput = app.locator('input[aria-label="修改金额"]').first();
@@ -208,19 +187,24 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
   const statusSelect = app.getByRole("combobox", { name: /修改报销状态/ }).first();
   await statusSelect.click();
   await page.getByRole("option", { name: "已报销", exact: true }).click();
-  await expect(statusSelect).toContainText("已报销");
-  await expect(statusSelect).toHaveAttribute("aria-expanded", "false");
-  await statusSelect.press("ArrowDown");
-  await expect(statusSelect).toHaveAttribute("aria-expanded", "true");
+  await expect(app.getByText("Uber Receipt", { exact: true })).toHaveCount(0);
+  await app.getByRole("button", { name: /已报销/ }).first().click();
+  await expect(app.getByText("2024年5月", { exact: true })).toBeVisible();
+  const reportedStatusSelect = app.getByRole("combobox", { name: /修改报销状态/ }).first();
+  await expect(reportedStatusSelect).toContainText("已报销");
+  await reportedStatusSelect.press("ArrowDown");
+  await expect(reportedStatusSelect).toHaveAttribute("aria-expanded", "true");
   const unreportedOption = page.getByRole("option", { name: "未报销", exact: true });
   const unreportedOptionId = await unreportedOption.getAttribute("id");
   expect(unreportedOptionId).toBeTruthy();
-  await expect(statusSelect).toHaveAttribute("aria-activedescendant", unreportedOptionId!);
-  await statusSelect.press("Enter");
-  await expect(statusSelect).toContainText("未报销");
-  await statusSelect.click();
-  await statusSelect.press("Escape");
-  await expect(statusSelect).toHaveAttribute("aria-expanded", "false");
+  await expect(reportedStatusSelect).toHaveAttribute("aria-activedescendant", unreportedOptionId!);
+  await reportedStatusSelect.press("Enter");
+  await app.getByRole("button", { name: /未报销/ }).first().click();
+  const unreportedStatusSelect = app.getByRole("combobox", { name: /修改报销状态/ }).first();
+  await expect(unreportedStatusSelect).toContainText("未报销");
+  await unreportedStatusSelect.click();
+  await unreportedStatusSelect.press("Escape");
+  await expect(unreportedStatusSelect).toHaveAttribute("aria-expanded", "false");
 
   await page.evaluate(() => {
     const dataTransfer = new DataTransfer();
@@ -261,24 +245,15 @@ test("管理月度消费、上传票据、迁移下月和触发导出", async ({
     return expenses.find((expense) => expense.id === "test-uber-1")?.attachments?.length ?? 0;
   }).toBe(2);
 
-  await app.getByRole("button", { name: /结转 \d+ 笔到6月/ }).click();
-
-  await expect(app.getByText("2024年6月", { exact: true })).toBeVisible();
-  await expect(app.getByText("Uber Receipt（结转）", { exact: true })).toBeVisible();
-  const carriedRow = app.locator("tbody tr").filter({ hasText: "Uber Receipt（结转）" }).first();
-  await expect(carriedRow).toContainText("2024/06/01");
-  await expect(carriedRow).toContainText("上月结转");
-  await expect(carriedRow).toContainText("原消费日期 2024/05/28");
-
-  await app.getByPlaceholder("搜索商家、备注").fill("Uber Receipt（结转）");
-  await expect(app.getByText("共 1 条记录")).toBeVisible();
+  await app.getByPlaceholder("搜索商家、备注").fill("Uber Receipt");
+  await expect(app.getByText("共 2 条记录")).toBeVisible();
 
   const downloadPromise = page.waitForEvent("download");
   await app.getByRole("button", { name: "导出 PDF" }).click();
   const download = await downloadPromise;
 
   expect(download.suggestedFilename()).toMatch(
-    /^消费明细-2024-06-01_至_2024-06-30-全部-搜索-UberReceipt（结转）-\d+\.pdf$/,
+    /^消费明细-全部月份-未报销-搜索-UberReceipt-\d+\.pdf$/,
   );
 });
 
@@ -440,7 +415,7 @@ test("澳元按 AUD 汇率展示且订单使用实付金额", async ({ page }) =
   await expect(page.getByText(/doubao-seed-2-0-lite-260428/)).toBeVisible();
 });
 
-test("重新识别结转记录不会删除共享附件的原始记录", async ({ page }) => {
+test("旧结转记录合并回原消费且保留共享附件", async ({ page }) => {
   const attachment = {
     id: "shared-receipt",
     name: "shared.png",
@@ -522,16 +497,15 @@ test("重新识别结转记录不会删除共享附件的原始记录", async ({
   );
 
   await page.goto("/#bill=reanalyze-shared");
+  await expect(page.getByText("原始消费（结转）", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".print-shell").getByText("2026/06/23", { exact: true })).toBeVisible();
   await page.locator('button[title="shared.png"]').click();
   await page.getByRole("button", { name: "重新识别并修复" }).click();
   await expect(page.locator("tbody.divide-y").getByText("¥18.80")).toBeVisible();
   await expect.poll(
-    () => savedExpenses.find((expense) => expense.id === "carried-record")?.originalAmount,
+    () => savedExpenses.find((expense) => expense.id === "original-record")?.originalAmount,
   ).toBe(18.8);
-  await expect.poll(() => savedExpenses.map((expense) => expense.id).sort()).toEqual([
-    "carried-record",
-    "original-record",
-  ]);
+  await expect.poll(() => savedExpenses.map((expense) => expense.id)).toEqual(["original-record"]);
 });
 
 test("支持跨页全选、Shift 连选和确认后批量删除", async ({ page }) => {
@@ -543,7 +517,7 @@ test("支持跨页全选、Shift 连选和确认后批量删除", async ({ page 
     originalAmount: index + 1,
     currency: "CNY",
     merchant: `商家 ${index + 1}`,
-    status: index % 2 === 0 ? "reported" : "unreported",
+    status: "unreported",
     note: "选择测试",
     source: "手动记录",
   }));
@@ -572,14 +546,6 @@ test("支持跨页全选、Shift 连选和确认后批量删除", async ({ page 
 
   await page.goto("/#bill=selection-test");
   const app = page.locator(".print-shell");
-  const settleButton = app.getByRole("button", { name: /一键结清未报销/ });
-  await settleButton.click();
-  await expect(app.getByText("已结清 5 条未报销消费")).toBeVisible();
-  await expect(
-    app.locator("tbody tr").filter({ hasText: "记录 2" }).getByRole("combobox", { name: /修改报销状态/ }),
-  ).toContainText("已报销");
-  await expect(settleButton).toBeDisabled();
-
   const selectAll = app.getByRole("checkbox", { name: "全选当前筛选结果" });
   await selectAll.click();
   await expect(selectAll).toHaveAttribute("aria-checked", "true");
@@ -627,6 +593,13 @@ test("支持跨页全选、Shift 连选和确认后批量删除", async ({ page 
     "selection-1",
   );
   expect(latestSavedExpenses).toHaveLength(6);
+
+  const settleButton = app.getByRole("button", { name: /全部标记为已报销/ });
+  await settleButton.click();
+  await expect(app.getByText("已将 6 条消费标记为已报销")).toBeVisible();
+  await expect(app.getByText("这里暂时没有消费记录")).toBeVisible();
+  await app.getByRole("button", { name: /已报销/ }).first().click();
+  await expect(app.getByText("共 6 条记录")).toBeVisible();
 });
 
 test("自动保存串行提交，旧快照不会覆盖新状态", async ({ page }) => {

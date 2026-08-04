@@ -1,25 +1,17 @@
 import {
-  AlertTriangle,
-  ArrowDownUp,
   ArrowLeft,
   ArrowRight,
   BadgeCheck,
   BrainCircuit,
   Building2,
-  CalendarDays,
   Check,
-  ChevronRight,
   CircleHelp,
   CloudUpload,
-  Columns3,
   Copy,
   Download,
-  FileText,
   ReceiptText,
   RefreshCw,
-  Repeat2,
   Search,
-  SlidersHorizontal,
   SquareCheckBig,
   Sparkles,
   Trash2,
@@ -37,12 +29,7 @@ import {
   exchangeRate,
   formatCny,
   formatUsd,
-  getCarryoverOriginalDate,
-  getMonthDateRange,
-  getMonthLabel,
-  isCarryoverExpense,
   normalizeDateRange,
-  parseMonthDate,
   twdExchangeRate,
 } from "./expense-domain";
 
@@ -79,9 +66,10 @@ function App() {
     uploadAreaRef,
     pdfReportRef,
     previewAttachment,
-    rangeExpenses,
+    viewExpenses,
+    unreportedExpenses,
     filteredExpenses,
-    unreportedRangeExpenseCount,
+    unreportedExpenseCount,
     totalPages,
     visiblePageNumbers,
     pagedExpenses,
@@ -90,8 +78,6 @@ function App() {
     summary,
     filterLabel,
     filteredSummary,
-    nextMonthPreview,
-    earlierUnreported,
     handleFiles,
     handleUploadClick,
     handleUploadKeyDown,
@@ -111,7 +97,6 @@ function App() {
     updateSelectedExpensesStatus,
     settleUnreportedExpenses,
     confirmDeleteExpenses,
-    rollToNextMonth,
     copyShareLink,
   } = useExpenseManager();
 
@@ -124,9 +109,9 @@ function App() {
               <ReceiptText className="size-5 text-slate-700" />
             </div>
             <div>
-              <h1 className="text-base font-semibold tracking-normal text-slate-950">月度消费管理</h1>
+              <h1 className="text-base font-semibold tracking-normal text-slate-950">消费报销管理</h1>
               <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                <span>消费、报销、下月结转</span>
+                <span>所有月份的费用，统一报销</span>
                 {billId ? (
                   <>
                     <span className="text-slate-300">/</span>
@@ -171,42 +156,51 @@ function App() {
         </header>
 
         <div className="px-6 py-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <DateRangePicker
-              currentMonth={currentMonth}
-              value={dateRange}
-              onChange={(value) => setDateRange(normalizeDateRange(value, currentMonth))}
-            />
-            <div className="no-print flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={() => showMonth(addMonths(currentMonth, -1))}
-                className="inline-flex h-10 items-center gap-2 rounded-md bg-white px-4 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"
-              >
-                <ArrowLeft className="size-4" />
-                上个月
-              </button>
-              <button
-                type="button"
-                onClick={() => showMonth(addMonths(currentMonth, 1))}
-                className="inline-flex h-10 items-center gap-2 rounded-md bg-white px-4 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"
-              >
-                下个月
-                <ArrowRight className="size-4" />
-              </button>
-              <button
-                type="button"
-                onClick={showToday}
-                className="inline-flex h-10 items-center rounded-md bg-white px-4 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"
-              >
-                今天
-              </button>
+          {statusFilter === "unreported" ? (
+            <div>
+              <h2 className="text-xl font-semibold tracking-normal text-slate-950">全部待报销</h2>
+              <p className="mt-1 text-sm text-slate-500">跨月份汇总，上传后直接出现在这里</p>
             </div>
-          </div>
+          ) : (
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <DateRangePicker
+                currentMonth={currentMonth}
+                value={dateRange}
+                onChange={(value) => setDateRange(normalizeDateRange(value, currentMonth))}
+              />
+              <div className="no-print flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => showMonth(addMonths(currentMonth, -1))}
+                  className="inline-flex h-10 items-center gap-2 rounded-md bg-white px-4 text-sm font-medium text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-50"
+                >
+                  <ArrowLeft className="size-4" />
+                  上个月
+                </button>
+                <button
+                  type="button"
+                  onClick={() => showMonth(addMonths(currentMonth, 1))}
+                  className="inline-flex h-10 items-center gap-2 rounded-md bg-white px-4 text-sm font-medium text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-50"
+                >
+                  下个月
+                  <ArrowRight className="size-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={showToday}
+                  className="inline-flex h-10 items-center rounded-md bg-white px-4 text-sm font-medium text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-50"
+                >
+                  今天
+                </button>
+              </div>
+            </div>
+          )}
 
-          <section className="print-break-avoid mt-6 grid overflow-hidden rounded-lg bg-white ring-1 ring-slate-100 md:grid-cols-4 md:divide-x md:divide-slate-100">
+          <section className="print-break-avoid mt-6 grid overflow-hidden rounded-lg bg-white ring-1 ring-slate-100 md:grid-cols-[1fr_0.35fr] md:divide-x md:divide-slate-100">
             <div className="p-5">
-              <p className="text-sm font-semibold text-slate-700">区间总金额（人民币）</p>
+              <p className="text-sm font-semibold text-slate-700">
+                {statusFilter === "unreported" ? "待报销总金额（人民币）" : "已报销金额（人民币）"}
+              </p>
               <p className="mt-4 text-3xl font-semibold tracking-normal text-slate-950">{formatCny(summary.total)}</p>
               <p className="mt-3 flex items-center gap-2 text-sm text-slate-500">
                 <span>≈ {formatUsd(summary.total / exchangeRate)}</span>
@@ -215,16 +209,6 @@ function App() {
                   1 USD = {exchangeRate.toFixed(2)} CNY · 1 AUD = {audExchangeRate.toFixed(2)} CNY · 1 TWD = {twdExchangeRate.toFixed(2)} CNY
                 </span>
               </p>
-            </div>
-            <div className="border-t border-slate-100 p-5 md:border-t-0">
-              <p className="text-sm font-semibold text-slate-700">已报销</p>
-              <p className="mt-4 text-2xl font-semibold tracking-normal text-emerald-700">{formatCny(summary.reported)}</p>
-              <p className="mt-3 text-sm text-slate-500">{summary.reportedRatio.toFixed(1)}%</p>
-            </div>
-            <div className="border-t border-slate-100 p-5 md:border-t-0">
-              <p className="text-sm font-semibold text-slate-700">未报销</p>
-              <p className="mt-4 text-2xl font-semibold tracking-normal text-orange-600">{formatCny(summary.unreported)}</p>
-              <p className="mt-3 text-sm text-slate-500">{summary.unreportedRatio.toFixed(1)}%</p>
             </div>
             <div className="border-t border-slate-100 p-5 md:border-t-0">
               <p className="text-sm font-semibold text-slate-700">消费笔数</p>
@@ -320,39 +304,22 @@ function App() {
           </section>
 
           <section className="mt-7">
-            {earlierUnreported.count > 0 ? (
-              <div className="no-print mb-5 flex flex-col gap-3 border-l-2 border-amber-400 bg-amber-50/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-700" />
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900">此前月份还有 {earlierUnreported.count} 笔未报销，尚未结转</p>
-                    <p className="mt-1 text-xs text-slate-600">合计 {formatCny(earlierUnreported.total)}，最早来自 {earlierUnreported.earliestMonth.replace("-", "年")}月</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => showMonth(parseMonthDate(earlierUnreported.earliestMonth))}
-                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold text-amber-800 transition hover:bg-amber-100 focus:outline-none focus:ring-4 focus:ring-amber-100"
-                >
-                  前往处理
-                  <ArrowRight className="size-4" />
-                </button>
-              </div>
-            ) : null}
             <div className="no-print flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-6">
                 <button
                   type="button"
-                  onClick={() => setStatusFilter("all")}
+                  onClick={() => setStatusFilter("unreported")}
                   className={`inline-flex items-center gap-2 border-b-2 pb-3 text-sm font-medium transition ${
-                    statusFilter === "all"
+                    statusFilter === "unreported"
                       ? "border-blue-600 text-slate-950"
                       : "border-transparent text-slate-500 hover:text-slate-800"
                   }`}
                 >
-                  <FileText className="size-4" />
-                  全部
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{rangeExpenses.length}</span>
+                  <Building2 className="size-4" />
+                  未报销
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                    {unreportedExpenses.length}
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -366,22 +333,7 @@ function App() {
                   <BadgeCheck className="size-4" />
                   已报销
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
-                    {rangeExpenses.filter((expense) => expense.status === "reported").length}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStatusFilter("unreported")}
-                  className={`inline-flex items-center gap-2 border-b-2 pb-3 text-sm font-medium transition ${
-                    statusFilter === "unreported"
-                      ? "border-blue-600 text-slate-950"
-                      : "border-transparent text-slate-500 hover:text-slate-800"
-                  }`}
-                >
-                  <Building2 className="size-4" />
-                  未报销
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
-                    {rangeExpenses.filter((expense) => expense.status === "unreported").length}
+                    {expenses.filter((expense) => expense.status === "reported").length}
                   </span>
                 </button>
               </div>
@@ -395,28 +347,18 @@ function App() {
                     className="h-9 w-48 rounded-md bg-white pl-9 pr-3 text-sm text-slate-700 shadow-sm outline-none ring-1 ring-slate-200 transition placeholder:text-slate-400 focus:ring-4 focus:ring-blue-50"
                   />
                 </div>
-                <button className="inline-flex h-9 items-center gap-2 rounded-md px-2 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-800">
-                  <SlidersHorizontal className="size-4" />
-                  筛选
-                </button>
-                <button className="inline-flex h-9 items-center gap-2 rounded-md px-2 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-800">
-                  <ArrowDownUp className="size-4" />
-                  排序
-                </button>
-                <button className="inline-flex h-9 items-center gap-2 rounded-md px-2 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-800">
-                  <Columns3 className="size-4" />
-                  自定义列
-                </button>
-                <button
-                  type="button"
-                  onClick={settleUnreportedExpenses}
-                  disabled={unreportedRangeExpenseCount === 0}
-                  className="inline-flex h-9 items-center gap-2 rounded-md bg-emerald-600 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
-                >
-                  <BadgeCheck className="size-4" />
-                  一键结清未报销
-                  <span className="rounded-full bg-white/20 px-1.5 py-0.5 text-xs">{unreportedRangeExpenseCount} 条</span>
-                </button>
+                {statusFilter === "unreported" ? (
+                  <button
+                    type="button"
+                    onClick={settleUnreportedExpenses}
+                    disabled={unreportedExpenseCount === 0}
+                    className="inline-flex h-9 items-center gap-2 rounded-md bg-emerald-600 px-3 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+                  >
+                    <BadgeCheck className="size-4" />
+                    全部标记为已报销
+                    <span className="rounded-full bg-white/20 px-1.5 py-0.5 text-xs">{unreportedExpenseCount} 条</span>
+                  </button>
+                ) : null}
               </div>
             </div>
 
@@ -461,10 +403,9 @@ function App() {
             <div className="mt-3 overflow-hidden rounded-lg bg-white ring-1 ring-slate-100">
               {filteredExpenses.length === 0 ? (
                 <EmptyState
-                  hasRangeExpenses={rangeExpenses.length > 0}
-                  onResetRange={() => setDateRange(getMonthDateRange(currentMonth))}
+                  hasRangeExpenses={viewExpenses.length > 0}
+                  onResetRange={showToday}
                   onClearFilters={() => {
-                    setStatusFilter("all");
                     setQuery("");
                   }}
                 />
@@ -524,22 +465,7 @@ function App() {
                             <div className="min-w-0">
                               <div className="flex min-w-0 items-center gap-2">
                                 <span className="truncate">{expense.description}</span>
-                                {isCarryoverExpense(expense) ? (
-                                  <span className="inline-flex shrink-0 items-center rounded bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
-                                    上月结转
-                                  </span>
-                                ) : null}
-                                {expense.recurring ? (
-                                  <span title="固定月度花费" className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-rose-50 text-rose-600">
-                                    <Repeat2 className="size-3" />
-                                  </span>
-                                ) : null}
                               </div>
-                              {getCarryoverOriginalDate(expense) ? (
-                                <span className="mt-1 block text-xs font-normal text-slate-500">
-                                  原消费日期 {getCarryoverOriginalDate(expense).replaceAll("-", "/")}
-                                </span>
-                              ) : null}
                             </div>
                           </td>
                           <td className="px-4 py-3">
@@ -628,61 +554,6 @@ function App() {
             </div>
           </section>
 
-          <section className="print-break-avoid mt-6 grid overflow-hidden rounded-lg bg-white ring-1 ring-slate-100 lg:grid-cols-[0.35fr_0.65fr]">
-            <div className="p-5">
-              <div className="flex items-center gap-2">
-                <RefreshCw className="size-5 text-blue-600" />
-                <h2 className="text-base font-semibold text-slate-950">结转规则</h2>
-              </div>
-              <ul className="mt-4 space-y-2 text-sm text-slate-500">
-                <li className="flex gap-2">
-                  <span className="mt-2 size-1.5 rounded-full bg-slate-400" />
-                  未报销消费可手动结转到下个月
-                </li>
-                <li className="flex gap-2">
-                  <span className="mt-2 size-1.5 rounded-full bg-slate-400" />
-                  月度固定消费结转时保留原日号
-                </li>
-                <li className="flex gap-2">
-                  <span className="mt-2 size-1.5 rounded-full bg-blue-500" />
-                  结转按当前整月计算，不受上方日期范围筛选影响
-                </li>
-              </ul>
-            </div>
-            <div className="flex flex-col gap-4 border-t border-slate-100 bg-white p-5 sm:flex-row sm:items-center sm:justify-between lg:border-l lg:border-t-0">
-              <div className="flex items-start gap-3">
-                <CalendarDays className="mt-0.5 size-5 text-blue-600" />
-                <div>
-                  <h2 className="text-base font-semibold text-slate-950">下月预览（{getMonthLabel(addMonths(currentMonth, 1))}）</h2>
-                  <p className="mt-2 text-sm text-slate-500">
-                    {nextMonthPreview.count > 0
-                      ? `待转入：未报销 ${nextMonthPreview.unreportedCount} 笔 · 固定消费 ${nextMonthPreview.recurringCount} 笔`
-                      : "当前月份已无待结转记录"}
-                  </p>
-                  <div className="mt-4 flex flex-wrap gap-8">
-                    <div>
-                      <p className="text-2xl font-semibold tracking-normal text-slate-950">{formatCny(nextMonthPreview.total)}</p>
-                    </div>
-                    <div>
-                      <p className="text-2xl font-semibold tracking-normal text-slate-950">{nextMonthPreview.count} 笔</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={rollToNextMonth}
-                disabled={nextMonthPreview.count === 0}
-                className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md bg-blue-600 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
-              >
-                <ChevronRight className="size-4" />
-                {nextMonthPreview.count > 0
-                  ? `结转 ${nextMonthPreview.count} 笔到${addMonths(currentMonth, 1).getMonth() + 1}月`
-                  : "已全部结转"}
-              </button>
-            </div>
-          </section>
-
           <p
             role="status"
             aria-live="polite"
@@ -710,6 +581,7 @@ function App() {
         <ExportPdfReport
           currentMonth={currentMonth}
           dateRange={dateRange}
+          scopeLabel={statusFilter === "unreported" ? "全部月份" : undefined}
           expenses={filteredExpenses}
           filterLabel={filterLabel}
           summary={filteredSummary}

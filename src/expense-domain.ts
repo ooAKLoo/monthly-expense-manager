@@ -94,7 +94,7 @@ export const analysisSteps = [
   "自动识别消费信息",
   "智能分类消费类型",
   "外币金额换算人民币",
-  "未报销项目下月迁移",
+  "自动加入待报销清单",
 ];
 
 export function amountInCny(expense: Pick<Expense, "currency" | "originalAmount">) {
@@ -254,6 +254,108 @@ export function getCarryoverOriginalDate(
 
 export function isCarryoverExpense(expense: Pick<Expense, "id" | "carryoverFromId" | "source">) {
   return Boolean(getCarryoverSourceId(expense)) || expense.source === "自动迁移" || expense.source === "上月结转";
+}
+
+/**
+ * 将旧版“结转”副本还原为原消费记录，避免同一笔费用在跨月待报销清单中重复出现。
+ * 旧账单仍可正常读取，但下一次保存后只保留真实消费日期和两种报销状态。
+ */
+export function simplifyCarryoverExpenses(expenses: Expense[]) {
+  const expenseById = new Map(expenses.map((expense) => [expense.id, expense]));
+  const result = new Map<string, Expense>();
+
+  const findOriginal = (expense: Expense) => {
+    let current = expense;
+    const visited = new Set<string>();
+    while (!current.recurring) {
+      const sourceId = getCarryoverSourceId(current);
+      if (!sourceId || visited.has(sourceId)) {
+        break;
+      }
+      const source = expenseById.get(sourceId);
+      if (!source) {
+        break;
+      }
+      visited.add(sourceId);
+      current = source;
+    }
+    if (current.id === expense.id && isCarryoverExpense(expense)) {
+      const attachmentIds = new Set(getExpenseAttachments(expense).map((attachment) => attachment.id));
+      const normalizedDescription = expense.description.replace(/（结转）$/, "");
+      const candidate = expenses
+        .filter(
+          (item) =>
+            item.id !== expense.id &&
+            !isCarryoverExpense(item) &&
+            item.date <= expense.date &&
+            ((attachmentIds.size > 0 &&
+              getExpenseAttachments(item).some((attachment) => attachmentIds.has(attachment.id))) ||
+              (item.description === normalizedDescription &&
+                item.merchant === expense.merchant &&
+                item.originalAmount === expense.originalAmount &&
+                item.currency === expense.currency)),
+        )
+        .sort((a, b) => b.date.localeCompare(a.date))[0];
+      if (candidate) {
+        current = candidate;
+      }
+    }
+    return current;
+  };
+
+  for (const expense of expenses) {
+    if (!isCarryoverExpense(expense) || expense.recurring) {
+      result.set(expense.id, {
+        ...expense,
+        carryoverFromId: undefined,
+        carryoverFromDate: undefined,
+      });
+    }
+  }
+
+  for (const expense of expenses) {
+    if (!isCarryoverExpense(expense) || expense.recurring) {
+      continue;
+    }
+
+    const original = findOriginal(expense);
+    if (original.id !== expense.id && expenseById.has(original.id)) {
+      const existing = result.get(original.id) ?? original;
+      const attachments = new Map(
+        [...getExpenseAttachments(existing), ...getExpenseAttachments(expense)].map((attachment) => [
+          attachment.id,
+          attachment,
+        ]),
+      );
+      result.set(original.id, {
+        ...existing,
+        status: expense.status === "unreported" ? "unreported" : existing.status,
+        attachment: existing.attachment ?? expense.attachment,
+        attachments: [...attachments.values()].filter(
+          (attachment) => attachment.id !== (existing.attachment ?? expense.attachment)?.id,
+        ),
+        carryoverFromId: undefined,
+        carryoverFromDate: undefined,
+      });
+      continue;
+    }
+
+    const originalDate = getCarryoverOriginalDate(expense);
+    result.set(expense.id, {
+      ...expense,
+      date: originalDate || expense.date,
+      description: expense.description.replace(/（结转）$/, ""),
+      source:
+        expense.source === "上月结转" || expense.source === "自动迁移"
+          ? "历史记录"
+          : expense.source,
+      note: expense.note.replace(/^上月未报销\s*·?\s*原消费日期\s*\d{4}[/-]\d{2}[/-]\d{2}\s*$/, ""),
+      carryoverFromId: undefined,
+      carryoverFromDate: undefined,
+    });
+  }
+
+  return [...result.values()];
 }
 
 export function getMonthLabel(date: Date) {
@@ -656,4 +758,3 @@ export function normalizeAmount(value: unknown) {
   const absoluteAmount = Math.abs(amount);
   return Number.isFinite(absoluteAmount) && absoluteAmount > 0 ? Number(absoluteAmount.toFixed(2)) : 0;
 }
-

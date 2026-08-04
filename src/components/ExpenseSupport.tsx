@@ -121,17 +121,17 @@ export function EmptyState({
     <div className="flex min-h-52 flex-col items-center justify-center bg-white text-center">
       <ReceiptText className="mb-3 size-8 text-slate-400" />
       <p className="text-sm font-medium text-slate-700">
-        {hasRangeExpenses ? "没有符合筛选条件的记录" : "所选日期范围暂无消费记录"}
+        {hasRangeExpenses ? "没有符合搜索条件的记录" : "这里暂时没有消费记录"}
       </p>
       <p className="mt-1 text-xs text-slate-500">
-        {hasRangeExpenses ? "可以清除状态或搜索条件后重试" : "可恢复整月范围，或上传新的消费票据"}
+        {hasRangeExpenses ? "可以清除搜索条件后重试" : "上传新的消费票据，或切换另一个报销状态"}
       </p>
       <button
         type="button"
         onClick={hasRangeExpenses ? onClearFilters : onResetRange}
         className="no-print mt-4 rounded-lg px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-50"
       >
-        {hasRangeExpenses ? "清除筛选" : "恢复整月"}
+        {hasRangeExpenses ? "清除搜索" : "查看今天"}
       </button>
     </div>
   );
@@ -140,12 +140,14 @@ export function EmptyState({
 export function ExportPdfReport({
   currentMonth,
   dateRange,
+  scopeLabel,
   filterLabel,
   expenses,
   summary,
 }: {
   currentMonth: Date;
   dateRange: DateRange;
+  scopeLabel?: string;
   filterLabel: string;
   expenses: Expense[];
   summary: ExportSummary;
@@ -171,7 +173,7 @@ export function ExportPdfReport({
         <div>
           <div style={{ fontSize: 24, fontWeight: 700 }}>消费明细</div>
           <div style={{ marginTop: 8, color: "#64748b", fontSize: 14 }}>
-            {getMonthLabel(currentMonth)} · {getDateRangeLabel(dateRange)} · 当前筛选：{filterLabel}
+            {scopeLabel ?? `${getMonthLabel(currentMonth)} · ${getDateRangeLabel(dateRange)}`} · 当前筛选：{filterLabel}
           </div>
         </div>
         <div style={{ color: "#64748b", fontSize: 13, textAlign: "right" }}>

@@ -1,13 +1,13 @@
 import { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Attachment, AttachmentPreviewTarget, Bill, DateRange, Expense, Status, UploadRecord,
-  addMonths, amountInCny, analyzeUploadedFiles, currentMonthDate,
-  dateInMonth, ensureBillIdInUrl, expenseMonthKey, filesFromClipboard,
-  getBrowserToday, getCarryoverSourceId, getDownloadStamp, getExpenseAttachments, getFilterLabel,
-  getMonthDateRange, getMonthLabel, getVisiblePageNumbers, isAcceptedUploadFile,
-  isCarryoverExpense, isTextEditingTarget, loadBill, monthKey, normalizeDateRange, pageSize,
+  amountInCny, analyzeUploadedFiles, currentMonthDate,
+  ensureBillIdInUrl, filesFromClipboard,
+  getBrowserToday, getDownloadStamp, getExpenseAttachments, getFilterLabel,
+  getMonthDateRange, getVisiblePageNumbers, isAcceptedUploadFile,
+  isTextEditingTarget, loadBill, monthKey, normalizeDateRange, pageSize,
   parseMonthDate, reanalyzeStoredAttachment, sanitizeFilenamePart, saveBill, seedExpenses, statuses,
-  uploadExpenseAttachments,
+  simplifyCarryoverExpenses, uploadExpenseAttachments,
 } from "../expense-domain";
 
 export function useExpenseManager() {
@@ -17,7 +17,7 @@ export function useExpenseManager() {
   const [currentMonth, setCurrentMonth] = useState(currentMonthDate);
   const [dateRange, setDateRange] = useState<DateRange>(() => getMonthDateRange(currentMonthDate()));
   const [expenses, setExpenses] = useState<Expense[]>(seedExpenses);
-  const [statusFilter, setStatusFilter] = useState<"all" | Status>("all");
+  const [statusFilter, setStatusFilter] = useState<Status>("unreported");
   const [query, setQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -82,7 +82,7 @@ export function useExpenseManager() {
         const loadedMonth = parseMonthDate(bill.currentMonth);
         setCurrentMonth(loadedMonth);
         setDateRange(normalizeDateRange(bill.dateRange, loadedMonth));
-        setExpenses(bill.expenses);
+        setExpenses(simplifyCarryoverExpenses(bill.expenses));
         setSelectedExpenseIds(new Set());
         selectionAnchorIdRef.current = null;
         setSaveStatus("已连接共享账单");
@@ -135,26 +135,30 @@ export function useExpenseManager() {
   }, [billId, currentMonth, dateRange, expenses, isLoadingBill]);
 
   const currentKey = monthKey(currentMonth);
-  const monthExpenses = useMemo(
+  const unreportedExpenses = useMemo(
     () =>
       expenses
-        .filter((expense) => expenseMonthKey(expense.date) === currentKey)
+        .filter((expense) => expense.status === "unreported")
         .sort((a, b) => b.date.localeCompare(a.date)),
-    [expenses, currentKey],
+    [expenses],
   );
-
-  const rangeExpenses = useMemo(
+  const reportedRangeExpenses = useMemo(
     () =>
-      monthExpenses.filter(
-        (expense) => expense.date >= dateRange.start && expense.date <= dateRange.end,
-      ),
-    [dateRange.end, dateRange.start, monthExpenses],
+      expenses
+        .filter(
+          (expense) =>
+            expense.status === "reported" &&
+            expense.date >= dateRange.start &&
+            expense.date <= dateRange.end,
+        )
+        .sort((a, b) => b.date.localeCompare(a.date)),
+    [dateRange.end, dateRange.start, expenses],
   );
+  const viewExpenses = statusFilter === "unreported" ? unreportedExpenses : reportedRangeExpenses;
 
   const filteredExpenses = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    return rangeExpenses.filter((expense) => {
-      const matchesStatus = statusFilter === "all" || expense.status === statusFilter;
+    return viewExpenses.filter((expense) => {
       const matchesQuery =
         normalized.length === 0 ||
         [
@@ -169,14 +173,11 @@ export function useExpenseManager() {
           .toLowerCase()
           .includes(normalized);
 
-      return matchesStatus && matchesQuery;
+      return matchesQuery;
     });
-  }, [query, rangeExpenses, statusFilter]);
+  }, [query, viewExpenses]);
 
-  const unreportedRangeExpenseCount = useMemo(
-    () => rangeExpenses.filter((expense) => expense.status === "unreported").length,
-    [rangeExpenses],
-  );
+  const unreportedExpenseCount = unreportedExpenses.length;
 
   const totalPages = Math.max(1, Math.ceil(filteredExpenses.length / pageSize));
   const visiblePageNumbers = useMemo(
@@ -218,23 +219,21 @@ export function useExpenseManager() {
   }, [totalPages]);
 
   const summary = useMemo(() => {
-    const total = rangeExpenses.reduce((sum, expense) => sum + amountInCny(expense), 0);
-    const reported = rangeExpenses
-      .filter((expense) => expense.status === "reported")
-      .reduce((sum, expense) => sum + amountInCny(expense), 0);
+    const total = viewExpenses.reduce((sum, expense) => sum + amountInCny(expense), 0);
+    const reported = statusFilter === "reported" ? total : 0;
     const unreported = total - reported;
-    const categories = new Set(rangeExpenses.map((expense) => expense.category)).size;
+    const categories = new Set(viewExpenses.map((expense) => expense.category)).size;
 
     return {
       total,
       reported,
       unreported,
-      count: rangeExpenses.length,
+      count: viewExpenses.length,
       categories,
       reportedRatio: total ? (reported / total) * 100 : 0,
       unreportedRatio: total ? (unreported / total) * 100 : 0,
     };
-  }, [rangeExpenses]);
+  }, [statusFilter, viewExpenses]);
 
   const filterLabel = useMemo(() => getFilterLabel(statusFilter, query), [query, statusFilter]);
 
@@ -251,47 +250,6 @@ export function useExpenseManager() {
       count: filteredExpenses.length,
     };
   }, [filteredExpenses]);
-
-  const nextMonthPreview = useMemo(() => {
-    const targetKey = monthKey(addMonths(currentMonth, 1));
-    const existingIds = new Set(expenses.map((expense) => expense.id));
-    const movable = monthExpenses.filter(
-      (expense) =>
-        (expense.status === "unreported" || expense.recurring) &&
-        !existingIds.has(`carry-${targetKey}-${expense.id}`),
-    );
-    const total = movable.reduce((sum, expense) => sum + amountInCny(expense), 0);
-    return {
-      count: movable.length,
-      total,
-      items: movable,
-      unreportedCount: movable.filter((expense) => !expense.recurring && expense.status === "unreported").length,
-      recurringCount: movable.filter((expense) => expense.recurring).length,
-    };
-  }, [currentMonth, expenses, monthExpenses]);
-
-  const earlierUnreported = useMemo(() => {
-    const carriedSourceIds = new Set(
-      expenses.map(getCarryoverSourceId).filter((id): id is string => Boolean(id)),
-    );
-    const items = expenses.filter(
-      (expense) =>
-        expense.date < `${currentKey}-01` &&
-        expense.status === "unreported" &&
-        !carriedSourceIds.has(expense.id),
-    );
-    return {
-      count: items.length,
-      total: items.reduce((sum, expense) => sum + amountInCny(expense), 0),
-      earliestMonth: items.reduce(
-        (earliest, expense) =>
-          !earliest || expenseMonthKey(expense.date) < earliest
-            ? expenseMonthKey(expense.date)
-            : earliest,
-        "",
-      ),
-    };
-  }, [currentKey, expenses]);
 
   const processFiles = async (incomingFiles: File[]) => {
     if (incomingFiles.length === 0) {
@@ -318,11 +276,12 @@ export function useExpenseManager() {
       }
 
       const result = await analyzeUploadedFiles(files, currentMonth, dateRange, billId);
-      const generated = result.expenses;
-      const outsideRangeCount = generated.filter(
-        (expense) => expense.date < dateRange.start || expense.date > dateRange.end,
-      ).length;
+      const generated = result.expenses.map((expense) => ({
+        ...expense,
+        status: "unreported" as Status,
+      }));
       setExpenses((previous) => [...generated, ...previous]);
+      setStatusFilter("unreported");
       setLastUpload({
         name: files.length === 1 ? files[0].name : `${files.length} 个文件`,
         count: generated.length,
@@ -334,7 +293,7 @@ export function useExpenseManager() {
         [
           `模型识别完成（${result.modelName}）`,
           result.warnings.length > 0 ? `部分文件提示：${result.warnings.join("；")}` : "",
-          outsideRangeCount > 0 ? `${outsideRangeCount} 条真实日期不在当前筛选范围内` : "",
+          generated.length > 0 ? "已加入全部月份的未报销清单" : "",
         ]
           .filter(Boolean)
           .join("；"),
@@ -508,11 +467,9 @@ export function useExpenseManager() {
                 id: existing.id,
                 status: existing.status,
                 note: existing.note || expense.note,
-                source: isCarryoverExpense(existing) ? existing.source : expense.source,
+                source: expense.source,
                 recurring: existing.recurring,
                 attachments: existing.attachments,
-                carryoverFromId: existing.carryoverFromId,
-                carryoverFromDate: existing.carryoverFromDate,
               }
             : { ...expense, attachments: existing.attachments };
         });
@@ -604,7 +561,8 @@ export function useExpenseManager() {
         pageIndex += 1;
       }
 
-      const filename = `消费明细-${dateRange.start}_至_${dateRange.end}-${sanitizeFilenamePart(filterLabel)}-${getDownloadStamp()}.pdf`;
+      const scope = statusFilter === "unreported" ? "全部月份" : `${dateRange.start}_至_${dateRange.end}`;
+      const filename = `消费明细-${scope}-${sanitizeFilenamePart(filterLabel)}-${getDownloadStamp()}.pdf`;
       pdf.save(filename);
       setExportNotice(`已下载 ${filename}`);
     } catch (error) {
@@ -704,18 +662,14 @@ export function useExpenseManager() {
   };
 
   const settleUnreportedExpenses = () => {
-    const ids = new Set(
-      rangeExpenses
-        .filter((expense) => expense.status === "unreported")
-        .map((expense) => expense.id),
-    );
+    const ids = new Set(unreportedExpenses.map((expense) => expense.id));
     if (ids.size === 0) {
       return;
     }
     setExpenses((previous) =>
       previous.map((expense) => (ids.has(expense.id) ? { ...expense, status: "reported" } : expense)),
     );
-    setExportNotice(`已结清 ${ids.size} 条未报销消费`);
+    setExportNotice(`已将 ${ids.size} 条消费标记为已报销`);
   };
 
   const confirmDeleteExpenses = () => {
@@ -724,35 +678,6 @@ export function useExpenseManager() {
     setExportNotice(`已删除 ${ids.size} 条消费记录`);
     setPendingDeleteIds([]);
     clearExpenseSelection();
-  };
-
-  const rollToNextMonth = () => {
-    const target = addMonths(currentMonth, 1);
-    const targetKey = monthKey(target);
-    const existingIds = new Set(expenses.map((expense) => expense.id));
-    const movedItems = nextMonthPreview.items
-      .map((expense) => {
-        const id = `carry-${targetKey}-${expense.id}`;
-        const carriedDate = expense.recurring ? dateInMonth(expense.date, target) : `${targetKey}-01`;
-        return {
-          ...expense,
-          id,
-          date: carriedDate,
-          description: expense.recurring ? expense.description : `${expense.description}（结转）`,
-          status: "unreported" as Status,
-          source: expense.recurring ? "固定月度" : "上月结转",
-          note: expense.recurring ? "下月固定花费" : `上月未报销 · 原消费日期 ${expense.date.replaceAll("-", "/")}`,
-          carryoverFromId: expense.id,
-          carryoverFromDate: expense.date,
-        };
-      })
-      .filter((expense) => !existingIds.has(expense.id));
-
-    if (movedItems.length > 0) {
-      setExpenses((previous) => [...movedItems, ...previous]);
-    }
-    setExportNotice(`已结转 ${movedItems.length} 笔到 ${getMonthLabel(target)}，记录已标记为“上月结转”`);
-    showMonth(target);
   };
 
   const copyShareLink = async () => {
@@ -795,9 +720,11 @@ export function useExpenseManager() {
     uploadAreaRef,
     pdfReportRef,
     previewAttachment,
-    rangeExpenses,
+    viewExpenses,
+    unreportedExpenses,
+    reportedRangeExpenses,
     filteredExpenses,
-    unreportedRangeExpenseCount,
+    unreportedExpenseCount,
     totalPages,
     visiblePageNumbers,
     pagedExpenses,
@@ -806,8 +733,6 @@ export function useExpenseManager() {
     summary,
     filterLabel,
     filteredSummary,
-    nextMonthPreview,
-    earlierUnreported,
     handleFiles,
     handleUploadClick,
     handleUploadKeyDown,
@@ -827,7 +752,6 @@ export function useExpenseManager() {
     updateSelectedExpensesStatus,
     settleUnreportedExpenses,
     confirmDeleteExpenses,
-    rollToNextMonth,
     copyShareLink,
   };
 }
